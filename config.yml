@@ -1,0 +1,78 @@
+version:
+    latest: "2022_10"
+    version_history:
+        - "2021_10_v1"
+        - "2021_11_v1"
+        
+year_info:
+    effective: 2023
+    range:
+        - 2013
+        - 2022
+
+gcs_bucket: "landfire"
+
+cloud_project: "pyregence-ee"
+
+geo: # using exact geo info thats shown in LF 2019 2.0.0 image
+    crsTransform:
+        - 30
+        - 0
+        - -2362425.0 # old: -23650345.0 
+        - 0
+        - -30
+        - 3177435 # old: 3185055.0
+    crs: "EPSG:5070"
+    dimensions:
+        - 154208
+        - 97283
+    scale: 30
+
+Fuels:
+    subdir: "conus/fuels"
+    layers:
+        - Fuels_CC
+        - Fuels_CH
+        - Fuels_CBH
+        - Fuels_CBD
+        - Fuels_FM40
+        - Fuels_FM40_preWUIupdate
+        - Fuels_FM40_WUI_RFupdate
+        - Fuels_FM40_WUI_CustomFuels
+        - Fuels_FM40_WUI_IrrigatedConversion
+
+Landfire:
+    subdir: "conus/landfire"
+    collections:
+
+Vulnerability:
+    subdir: "conus/vulnerability"
+    layers:
+        - wui_v2
+        - wui_v3
+        - wui_v3_w_nonWUIclasses
+
+DIST:
+    ee_subdir: "workflow_assets"
+    gaia_subdir: "/mnt/hyperion/data/pyregence-ee/fuel-profile-outputs/dist/intmd"
+    gcs_subdir: "dist_outputs"
+    layers:
+        - dist_treatmentsRanks
+        - bs_supplement
+        - dist_wildfire
+        - dist_all 
+Treatments:
+    gcs_subdir: "treatments"
+LUCAS:
+    subdir: "lucas/fuelOutputs"
+    layers: 
+        - cbd_2020_rf
+        - cbd_2050_rf
+        - cbh_2020_rf
+        - cbh_2050_rf
+        - cc_2020_rf
+        - cc_2050_rf 
+        - ch_2020_rf
+        - ch_2050_rf
+        - fm40_2020_rf
+        - fm40_2050_rf
