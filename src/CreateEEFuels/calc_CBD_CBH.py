@@ -100,6 +100,13 @@ def main():
         help="asset path of output folder"
 
     )
+    parser.add_argument(
+        "-f",
+        "--fuels_source",
+        type=str,
+        help="source of baseline fuels dataset. One of: firefactor, pyrologix"
+    
+    )
     args = parser.parse_args()
 
     dist_img_path = args.dist_img_path
@@ -121,52 +128,47 @@ def main():
 
     # define where the distrubance regression tables can be found on cloud storage
     # defining two because CBH was preprocess and QA'ed so points to updated table
-    #base_uri = "gs://landfire/LFTFCT_tables/{0}_Disturbance_Tbl.csv"
+    base_uri = "gs://landfire/LFTFCT_tables/{0}_Disturbance_Tbl.csv"
     base_uri2 = "gs://landfire/LFTFCT_tables/{0}_Disturbance_Tbl_filled.csv"
 
     # define the image collections for the raster data needed for calculations
-    
-    cc_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/landfire/cc")
-    cbd_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/landfire/cbd")
-    cbh_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/landfire/cbh")
-    ch_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/landfire/ch")
     evt_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/landfire/fvt")
-    
+    fvc_mid_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/fuels/Midpoint_CC")
+    fvh_mid_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/fuels/Midpoint_CH")
+
     # start by extracting out the specific image we need for the regression calculations
     # we need the version 200 / year 2016 data
     # sometimes the date metadata is not actually 2016 so we filter by version as select first image in time
-    # Canopy cover image
-    # cc_img = ee.Image(
-    #     cc_ic.filter(ee.Filter.eq("version", 200)).limit(1, "system:time_start").first()
-    # )
-    # AFF - we use FFv1 layers as baseline, updating only in DIST img areas
-    cc_img = ee.Image("projects/pyregence-ee/assets/conus/fuels/Fuels_CC_2021_12") # using FFv1 as baseline
-    # Canopy height image
-    # ch_img = ee.Image(
-    #     ch_ic.filter(ee.Filter.eq("version", 200)).limit(1, "system:time_start").first()
-    # )
-    ch_img = ee.Image("projects/pyregence-ee/assets/conus/fuels/Fuels_CH_2021_12") # using FFv1 as baseline
 
-    # cbd_img = ee.Image(
-    #     cbd_ic.filter(ee.Filter.eq("version", 200))
-    #     .limit(1, "system:time_start")
-    #     .first()
-    # )
-    cbd_img = ee.Image("projects/pyregence-ee/assets/conus/fuels/Fuels_CBD_2021_12") # using FFv1 as baseline
-    # Canopy base height image
-    # cbh_img = ee.Image(
-    #     cbh_ic.filter(ee.Filter.eq("version", 200))
-    #     .limit(1, "system:time_start")
-    #     .first()
-    # )
-    cbh_img = ee.Image("projects/pyregence-ee/assets/conus/fuels/Fuels_CBH_2021_12") # using FFv1 as baseline
+    if args.fuels_source == "firefactor":
+        cc_img = ee.Image("projects/pyregence-ee/assets/conus/fuels/Fuels_CC_2021_12") # using FFv1 as baseline, needed for postprocessing
+        cbh_img = ee.Image("projects/pyregence-ee/assets/conus/fuels/Fuels_CBH_2021_12") # using FFv1 as baseline
+        cbd_img = ee.Image("projects/pyregence-ee/assets/conus/fuels/Fuels_CBD_2021_12") # using FFv1 as baseline
+    elif args.fuels_source == "pyrologix":
+        cc_img = ee.Image("projects/pyregence-ee/assets/subconus/california/pyrologix/cc/cc2022") #Pyrologix as baseline, needed for postprocessing
+        cbh_img = ee.Image("projects/pyregence-ee/assets/subconus/california/pyrologix/cbh/cbh2022") #Pyrologix as baseline
+        cbd_img = ee.Image("projects/pyregence-ee/assets/subconus/california/pyrologix/cbd/cbd2022") #Pyrologix as baseline
+    else:
+        raise ValueError(f"{args.fuels_source} not a valid fuels data source. Valid data sources: firefactor, pyrologix")
+
     # EVT image
     evt_img = ee.Image(
         evt_ic.filter(ee.Filter.eq("version", 200))
         .limit(1, "system:time_start")
         .first()
     )
-    
+    # FVC midpoint image
+    fvc_mid_img = ee.Image(
+        fvc_mid_ic.filter(ee.Filter.eq("version", 200))
+        .limit(1, "system:time_start")
+        .first()
+    )
+    # FVH midpoint image
+    fvh_mid_img = ee.Image(
+        fvh_mid_ic.filter(ee.Filter.eq("version", 200))
+        .limit(1, "system:time_start")
+        .first()
+    )
     # zone image to identify which pixel belong to zone
     zone_img = ee.Image("projects/pyregence-ee/assets/conus/landfire/zones_image")
 
@@ -181,17 +183,17 @@ def main():
     dist_mask = dist_img.mask() # this creates 1's everywhere include outside disturbed areas. not using
 
     #canopy guide collection for post-processing ruleset
-    # AFF - create cg collection path from the dist_img_path
-    cg_path = dist_img_path.replace('treatment_scenarios','fuelscapes_scenarios') + '/canopy_guide_collection'
+    # create cg collection path from the dist_img_path
+    cg_path = f"{out_folder_path}/canopy_guide_collection"    
     canopy_guide = ee.ImageCollection(f"{cg_path}").select('newCanopy').mosaic()
     
     # Here we are using the newly generated CC and CH as the midpoint images instead of FVH/C_Midpoint images
     # CC and CH are already binned to midpoint values during their calculation, only need to divide CH by 10 to get unscaled midpoint
     # Post-Disturbance Cover midpoint 
-    post_cover_mid_img = ee.Image(dist_img_path.replace('treatment_scenarios','fuelscapes_scenarios') + '/CC')
-    
+    post_cover_mid_img = ee.Image(f"{out_folder_path}/CC")
+
     # Post-Disturbance Height midpoint 
-    new_ch = ee.Image(dist_img_path.replace('treatment_scenarios','fuelscapes_scenarios') + '/CH')
+    new_ch = ee.Image(f"{out_folder_path}/CH")
     post_height_mid_img = new_ch.divide(10)
     
     # encode the images into unique codes

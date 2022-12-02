@@ -139,11 +139,6 @@ def main():
     evhr_name = "EVHR"
     bpsrf_name = "BPSRF"
 
-    # define a list of zone information
-    # does a skip from 67 to 98...not sure why just the zone numbers
-    #zones = list(range(1, 67)) + [98, 99] # all CONUS zones used for FireFactor.. check which zones your AOI falls in and provide them as a list
-    zones = [6] # For AFF project, entire AOI falls in LF Zone 6
-
     # define the image collections for the raster data needed for calculations
     bps_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/landfire/bps")
     # fbfm40_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/landfire/fbfm40")
@@ -181,16 +176,8 @@ def main():
         .limit(1, "system:time_start")
         .first()
     )
-    # FM40 image from previous time, used when there is no distubance
-    # oldfm40_img = ee.Image(
-    #     fbfm40_ic.filter(ee.Filter.eq("version", 200))
-    #     .limit(1, "system:time_start")
-    #     .first()
-    # )
     
     old_cg = ee.ImageCollection("projects/pyregence-ee/assets/conus/fuels/canopy_guide_2021_12_v1").select('newCanopy').mosaic()
-    # zone image to identify which pixel belong to zone
-    zone_img = ee.Image("projects/pyregence-ee/assets/conus/landfire/zones_image")
 
     # define disturbance image used for the DIST codes
     # this will update with new disturbance info
@@ -198,6 +185,17 @@ def main():
     dist_img = ee.Image(
         f"{dist_img_path}"
     ).unmask(0)
+
+    # define a list of zone information
+    # does a skip from 67 to 98...not sure why just the zone numbers
+    #zones = list(range(1, 67)) + [98, 99] # all CONUS zones used for FireFactor.. check which zones your AOI falls in and provide them as a list
+    # zone image to identify which pixel belong to zone
+    zone_img = ee.Image("projects/pyregence-ee/assets/conus/landfire/zones_image")
+    zones_fc = ee.FeatureCollection("projects/pyregence-ee/assets/conus/landfire/zones")
+    # instead of listing all Zone numbers in CONUS (Firefactor), we dynamically find zone numbers of zones intersecting the DIST img footprint
+    zones = zones_fc.filterBounds(dist_img.geometry()).aggregate_array('ZONE_NUM').getInfo() # spatial intersect finding Landfire zones that overlap disturbance img footprint
+    logger.info(zones)
+    #zones = [5,6,12] # For AFF project, entire AOI falls in LF Zone 6
 
     # encode the images into unique codes
     # code will be a 16 digit value where each group of values

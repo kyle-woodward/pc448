@@ -91,6 +91,13 @@ def main():
         type=str,
         help="property to rasterize on, one of DIST or ranks"
     )
+
+    parser.add_argument(
+        "-a",
+        "--aoi",
+        type=str,
+        help="Earth Engine asset path to an aoi feature collection or template image with desired boundaries"
+    )
     args = parser.parse_args()
 
     # parse config file
@@ -125,12 +132,25 @@ def main():
     
     logger.info(final.bandNames().getInfo())
    
+    # Use aoi path provided to parameterize the region for export
+    aoi_path = args.aoi
+    if aoi_path == None:
+        AOI = cc_img.geometry() # no aoi path provided will result in exported img with whole CONUS boundary
+    else: #user provides asset path to a image or featurecollection to use as the AOI
+        asset_type = ee.data.getAsset(aoi_path).get('type') # determine what it is
+    if asset_type == "IMAGE":
+        AOI = ee.Image(aoi_path) # cast it
+    elif asset_type == "TABLE":
+        AOI = ee.FeatureCollection(aoi_path) # cast it
+    else:
+        raise RuntimeError(f"{asset_type} is not one of IMAGE or TABLE")
+    
     desc = os.path.basename(args.output).replace('/','_') 
     task = ee.batch.Export.image.toAsset(
         image=final,
         description=desc,
         assetId=args.output,
-        region=cc_img.geometry(),
+        region=AOI.geometry(),
         crsTransform=geo_t,
         crs=crs,
         maxPixels=1e12,
