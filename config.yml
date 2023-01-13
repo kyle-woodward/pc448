@@ -7,8 +7,8 @@ version:
 year_info:
     effective: 2023
     range:
-        - 2013
-        - 2022
+        - 2014
+        - 2023
 
 gcs_bucket: "landfire"
 
