@@ -35,40 +35,41 @@ logger.setLevel(logging.INFO)
 def make_full_dist_shp(files:list, local_treatments_dir:str, local_zones_file:str, year_range:list, eff_yr:int) -> gpd.GeoDataFrame:
     
     def dist_rank_calculate(gdf:gpd.GeoDataFrame, TSD_remap:dict) -> gpd.GeoDataFrame:
-            #make 3rd digit padded Type Severity code
-            gdf.loc[:,'TYPE_SEV_0'] = (gdf['TYPE_SEV'] * 10).astype(int)
-            gdf.loc[:,'diff_yr'] = (eff_yr - gdf['YEAR']).astype(int)
-            
-            #remap diff_yr value to TSD code based on zones rules
-            gdf.loc[:,'TSD'] = gdf['diff_yr'].map(TSD_remap)
-            gdf.loc[:,'DIST'] = (gdf['TYPE_SEV_0'] + gdf['TSD']).astype(int)
-            
-            # remap DIST code values to ranked values for export
-            gdf.loc[:,'ranks'] = gdf['DIST'].map(code_ranks_dict)
-            
-            return gdf
+        #make 3rd digit padded Type Severity code
+        gdf.loc[:,'TYPE_SEV_0'] = (gdf['TYPE_SEV'] * 10).astype(int)
+        gdf.loc[:,'diff_yr'] = (eff_yr - gdf['YEAR']).astype(int)
+        
+        #remap diff_yr value to TSD code based on zones rules
+        gdf.loc[:,'TSD'] = gdf['diff_yr'].map(TSD_remap)
+        gdf.loc[:,'DIST'] = (gdf['TYPE_SEV_0'] + gdf['TSD']).astype(int)
+        
+        # remap DIST code values to ranked values for export
+        gdf.loc[:,'ranks'] = gdf['DIST'].map(code_ranks_dict)
+        
+        return gdf
 
     # retrieve lookup table google sheet
     gc = gspread.service_account()
-    trt_xwalk = gc.open("PNF treatment dist assignments")
-    lookup_table = pd.DataFrame(trt_xwalk.worksheet("DIST code").get_all_records())
+    # going back and forth whether to use PNF LUT that we mde for pc448 or the FireFactor "super sheet" 
+    trt_xwalk = gc.open("PNF treatment dist assignments")  #pc448 sheet
+    # trt_xwalk = gc.open("Fuels-Treatments Crosswalk") # The FF super sheet
+    lookup_table = pd.DataFrame(trt_xwalk.worksheet("DIST code").get_all_records()) # pc448 sheet
+    # lookup_table = pd.DataFrame(trt_xwalk.worksheet("Lookup").get_all_records()) # The FF super sheet
 
     # create empty gdf to place processed gdfs on each for-loop iteration
     gdf_collection = gpd.GeoDataFrame()
     
     for file in files:
-        file_pth = os.path.join(local_treatments_dir, os.path.basename(file))
+        file_pth = file #os.path.join(local_treatments_dir, os.path.basename(file))
         logger.info(f'reading {file_pth} to geopandas, joining to treatments lookup')
 
         start = time.time()
+        
         # do the necessary wrangling and year filtering after joining to treatments lookup
         shp = gpd.read_file(file_pth)
-                
-        # shp.loc[:,'CONCAT'] = (shp['TREATMENT'].astype(str) + ' ' + shp['YEAR'].astype(str))
-        # shp = shp.merge(lookup_table, how='inner', left_on='CONCAT', right_on='CONCAT')
+        logger.info(f'total records in input shp: {shp.shape[0]}')
         shp = shp.merge(lookup_table, how='inner', left_on='TREATMENT', right_on='TREATMENT')
-        # shp = shp.drop(columns=['TREATMENT_y', 'YEAR_y']).rename(columns={"YEAR_x": "YEAR", "TREATMENT_x": "TREATMENT"})
-        # shp = shp[['DATE', 'TREATMENT', 'YEAR', 'source_id', 'geometry', 'TYPE_SEV']] # don't need SOURCE as its not true indication of where that unique treatment came from originally
+        
         shp.loc[:,'TYPE_SEV'] = shp['TYPE_SEV'].astype(int) 
         # filter to remove invalid TYPE_SEV values that would be over 100 
         # (TYPE_SEV =  TYPE*100 + Severity so invalid values are 847, 968, and 1089)
@@ -100,11 +101,6 @@ def make_full_dist_shp(files:list, local_treatments_dir:str, local_zones_file:st
         # shp_se = shp_se[['DATE', 'TREATMENT', 'YEAR', 'source_id', 'geometry', 'TYPE_SEV', 'ZONE_NUM']] 
         shp_se = shp_se[['TREATMENT', 'YEAR', 'geometry', 'TYPE_SEV', 'ZONE_NUM']] # reduced field schema for custom applications 
         logger.info(f'records in shp_se: {shp_se.shape[0]}')
-        
-        # unexpected behavior: sometimes len(shp_se) + len(shp_non_se) != len(shp_4326), other times it is correct though 
-        # this could be due to what .sjoin() is retaining; creating and using tmp_idx column
-        # to .drop_duplicates(subset=['tmp_idx']) solved it for some but not for others
-        # could also be an invalid geometry problem which would take work to fix all the datasets
         
         #spatial join, drop all but ZONE_NUM column from the zones gdf
         shp_non_se = gpd.sjoin(shp_4326,non_se_zones_4326, how='inner')
@@ -146,7 +142,7 @@ def make_full_dist_shp(files:list, local_treatments_dir:str, local_zones_file:st
         gdf_collection = gpd.GeoDataFrame(pd.concat([both_converted, gdf_collection]))
         final_prj_collection = gdf_collection.set_crs(epsg=4326) #set crs to WGS84 
         end = time.time()
-        logger.info(f'Time Elapsed: {(end-start)/60} minutes\n')
+        logger.info(f'Time Elapsed: {(end-start)/60} minutes')
     return final_prj_collection
 
 def main():
@@ -215,13 +211,13 @@ def main():
     logger.info(f"effective year: {eff_yr}")
     logger.info(f"year range: {year_range}")
     
-    if args.file == None:
+    if args.file == None: # user does not provide -f file path arg to treatments shp, case is currently not handled well
         files = os.listdir(local_treatments_dir)
     else:
-        files = [os.path.basename(args.file)] # directly provide treatment shapefile path (.shp|.zip)
+        files = [args.file] # directly provide treatment shapefile path (.shp|.zip)
     
 
-    input_filename = files[0].split('.')[0]
+    input_filename = os.path.basename(files[0]).split('.')[0]
     file_prefix = 'dist_w_ranks_'
     out_shp = os.path.join(output_dir,file_prefix+input_filename+'.shp')
     zipfile_path = out_shp.replace('.shp','.zip')
@@ -230,65 +226,38 @@ def main():
     logger.info(f"input filename: {input_filename}")
     logger.info(f"output shpfile: {out_shp}")
     logger.info(f"zipfile_path: {zipfile_path}")
-    
-    # if not os.path.exists(zipfile_path):
-        ### AVOID GCS part - put them there yourself (e.g.e repo/data/treatments/) ###
-        
-        # if not len(os.listdir(local_treatments_dir)) == 16:
-        # logger.info(f"Downloading versioned files from {bucket_dir}/treatments/{version}")
-        # get_gs_files = f'gsutil -m cp {bucket_dir}/treatments/{version} {local_treatments_dir}' 
-        # proc = subprocess.run(get_gs_files, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        # if proc.returncode != 0:
-        #     logger.info(proc.stdout)
-        #     raise Exception('gsutil rsync failed, ensure folder exsists on GS bucket')
-    # files = os.listdir(local_treatments_dir)
-        # if len(files) == 0:
-        #     raise RuntimeError('Found 0 files with version tag, ensure you have promoted all desired files to newest version (run utils.version_manager.py)..')
-    #else:
-        # do processing 
-    
-    logger.info(f"Found {len(files)} files, starting DIST shp generation\n")
-    shp=make_full_dist_shp(files=files, local_treatments_dir=local_treatments_dir, local_zones_file=local_zones_file, year_range=year_range, eff_yr=eff_yr)
-    
-    # output final shp to local storage
-    logger.info(f'Exporting {out_shp}')
-    shp.to_file(os.path.join(output_dir, out_shp))
+    if not os.path.exists(zipfile_path):
+        logger.info(f"Found {len(files)} files, starting DIST shp generation")
+        shp=make_full_dist_shp(files=files, local_treatments_dir=local_treatments_dir, local_zones_file=local_zones_file, year_range=year_range, eff_yr=eff_yr)
+        print(shp.head())
+        # output final shp to local storage
+        logger.info(f'Exporting {out_shp}')
+        shp.to_file(os.path.join(output_dir, out_shp))
 
-    # zip .shp and associated files 
-    list_files  = [os.path.join(output_dir,i) for i in os.listdir(output_dir) if fnmatch(i,f'*{input_filename}*')]
-    logger.info(f"Adding files to .zip archive: {list_files}")
-    with zipfile.ZipFile(zipfile_path, 'w') as zipF:
-        for file in list_files:
-            zipF.write(filename=file,compress_type=zipfile.ZIP_DEFLATED) # this is kind of funky, can't figure out how to get rel file path not whole directory to be added into archive file
-    
-    # upload .zip to cloud storage
-    logger.info(f"Uploading {zipfile_path} to {gcs_outfile}")
-    gsutil_upload_cmd = f"gsutil cp {zipfile_path} {gcs_outfile}"
-    logger.info(gsutil_upload_cmd)
-    proc = subprocess.run(gsutil_upload_cmd, shell=True,stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    if proc.returncode != 0:
-        logger.info(proc.stdout)
-        raise Exception('gsutil upload failed, ensure folder exsists on GS bucket')
+        # zip .shp and associated files 
+        list_files  = [os.path.join(output_dir,i) for i in os.listdir(output_dir) if fnmatch(i,f'*{input_filename}*')]
+        logger.info(f"Adding files to .zip archive: {list_files}")
+        with zipfile.ZipFile(zipfile_path, 'w') as zipF:
+            for file in list_files:
+                zipF.write(file,os.path.basename(file),compress_type=zipfile.ZIP_DEFLATED) # this is kind of funky, can't figure out how to get rel file path not whole directory to be added into archive file
         
-        # # upload .zip to GAIA 
-        # logger.info(f'Exporting {zipfile_path} to {os.path.join(gaia_dir,os.path.basename(zipfile_path))}')
-        # # shp.to_file(os.path.join(gaia_dir, out_shp))
-        # linux_cp_cmd = f"cp {zipfile_path} {os.path.join(gaia_dir,os.path.basename(zipfile_path))}"
-        # proc = subprocess.run(linux_cp_cmd, shell=True,stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        # if proc.returncode != 0:
-        #     logger.info(proc.stdout)
-        #     raise Exception('linux cp cmd failed')
-        
-    # upload .zip to Earth Engine
-    logger.info(f'Uploading {gcs_outfile} to Earth Engine: {ee_asset}')
-    ee_upload_cmd = f"earthengine upload table --asset_id={ee_asset} {gcs_outfile}"
-    logger.info(ee_upload_cmd)
-    proc = subprocess.run(ee_upload_cmd, shell=True,stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    if proc.returncode != 0:
-        logger.info(proc.stdout)
-        raise Exception('earthengine upload cmd failed')
-# else:
-#     raise Exception(f'{out_shp} already exists')
+        # upload .zip to cloud storage
+        gsutil_upload_cmd = f"gsutil cp {zipfile_path} {gcs_outfile}"
+        logger.info(gsutil_upload_cmd)
+        proc = subprocess.run(gsutil_upload_cmd, shell=True,stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if proc.returncode != 0:
+            logger.info(proc.stdout)
+            raise Exception('gsutil upload failed, ensure folder exsists on GS bucket')
+            
+        # upload .zip to Earth Engine
+        ee_upload_cmd = f"earthengine upload table --asset_id={ee_asset} {gcs_outfile}"
+        logger.info(f"{ee_upload_cmd}\n")
+        proc = subprocess.run(ee_upload_cmd, shell=True,stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if proc.returncode != 0:
+            logger.info(proc.stdout)
+            raise Exception('earthengine upload cmd failed')
+    else:
+        raise Exception(f'{zipfile_path} already exists')
 
 if __name__ == '__main__':
     main()
