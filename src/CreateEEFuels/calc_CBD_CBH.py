@@ -252,15 +252,16 @@ def main():
         .multiply(10) #scale decimal regress output
         .toInt16()
         .clamp(0,100)
-        .unmask(cbh_img) # fill un-disturbed pixels with fuel value
         .where(canopy_guide.eq(0), 0) # 0 where CG is 0
         .where(canopy_guide.eq(2), 100) # 100 (10m) where CG is 2
         .where(cc_img.eq(0), 0) # 0 where CG is 0
-        .updateMask(zone_img)
         .rename('CBH')
         )
     cbh = cbh.where(cbh.gt(new_ch), new_ch.multiply(0.7).toInt16()).rename('CBH') # CBH can't be larger than CH; where it is, reduce CBH to 2/3 of CH
-    
+    cbh = (cbh.unmask(cbh_img) # fill un-disturbed pixels with baseline fuel value
+        .updateMask(zone_img) # cleans up CONUS-wide boundaries
+        )
+
     # define where to export image
     output_asset = f"{output_folder}/CBH"
 
@@ -329,11 +330,11 @@ def main():
         .multiply(100)
         .clamp(0,45)
         .toInt16()
-        .unmask(cbd_img) # fill un-disturbed pixels with pre- fuel value
         .where(canopy_guide.eq(0), 0) # 0 where CG is 0
         .where(canopy_guide.eq(2), 1) # 1 (0.012kg/m^3) where CG is 2
         .where(canopy_guide.eq(3), 1) # 1 (0.012kg/m^3) where CG is 3
         .where(cc_img.eq(0), 0) # 0 where CC 2019 is 0
+        .unmask(cbd_img) # fill un-disturbed pixels with pre- fuel value
         .updateMask(zone_img)
         .rename("CBD")
     )
