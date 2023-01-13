@@ -278,9 +278,9 @@ def main():
                 .clamp(0,100)
                 .toInt16()
                 .remap(values,bins,0)
-                .unmask(fills[i])
                 .where(canopy_guide.eq(0), 0) # zero out where CG is 0
                 .where(cc_img.eq(0), 0) # zero out where CC 2019 is 0
+                .unmask(fills[i]) # fill un-disturbed pixels with pre- fuel value
                 .updateMask(zone_img)
                 .rename(var.lower())
                 )
@@ -310,9 +310,9 @@ def main():
                 .remap(values,bins,0)
                 .multiply(10)
                 .clamp(0,510)
-                .unmask(fills[i])
                 .where(canopy_guide.eq(0), 0) # zero out where CG is 0
                 .where(cc_img.eq(0), 0) # zero out where CC is 0
+                .unmask(fills[i]) # fill un-disturbed pixels with pre- fuel value
                 .updateMask(zone_img)
                 .rename(var.lower()) 
                 )
@@ -333,8 +333,7 @@ def main():
         )
         task.start()  # kick off export task
         logger.info(f"Exporting {output_asset}")
-        # logger.info(f"CG path: {cg_path}")
-        # logger.info(f"would export {output_asset}")
+        
 # main level process if running as script
 if __name__ == "__main__":
     main()
