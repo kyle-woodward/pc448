@@ -20,8 +20,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-ee.Initialize()
-
+try:
+    credentials = ee.ServiceAccountCredentials(email=None,key_file='/home/private-key.json')
+    ee.Initialize(credentials)
+except:
+    ee.Initialize()
+    
 # this function is currently not used because the encoded values are precomputed in cmb_table_qa
 # will keep just in case...
 def encode_table(table: ee.Dictionary):

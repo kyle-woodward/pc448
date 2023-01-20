@@ -21,8 +21,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-ee.Initialize()
-
+try:
+    credentials = ee.ServiceAccountCredentials(email=None,key_file='/home/private-key.json')
+    ee.Initialize(credentials)
+except:
+    ee.Initialize()
+    
 def encode_table(table):
     """Function to take dictionary representation of CSV and
     encode the DIST and EVT values into a unique code
