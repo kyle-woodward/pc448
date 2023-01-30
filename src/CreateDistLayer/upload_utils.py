@@ -24,6 +24,8 @@ def zip_shp(shpfile:str):
     zip .shp and associated files at current directory
     args: 
         shpfile (str): file path to shapefile
+    return:
+        path to zipped file 
     """
     # path = Path(shpfile).resolve()
     parent = os.path.dirname(shpfile)
@@ -58,7 +60,8 @@ def upload_gcs(local_file:str,bucket:str,project_folder:str):
     out, err = proc.communicate()
     return gcs_dest
     # finally upload GCS storage file to GEE in newly created asset folder
-    
+
+
 def upload_gee(gcs_file:str,bucket:str,project_folder:str,type:str):
     """
     Upload files from Google Cloud Storage Bucket to GEE assets
@@ -68,32 +71,38 @@ def upload_gee(gcs_file:str,bucket:str,project_folder:str,type:str):
         project_folder (str): GEE project folder to create at projects/pyregence-ee/assets/{bucket}/{project}) for project-level file storage
         type (str): one of: ['image','table']
     returns:
-        None
+        the file's asset path in GEE (str)
     """
     if (not type!='image') or (type!='table'):
         raise ValueError(f"type must be 'image' or 'table': {type}")
     logger.info(f"gcs file: {gcs_file}")
-    # must first make directory tree in GEE assets
-    gee_parent_folder = f"projects/pyregence-ee/assets/{bucket}/{project_folder}" # we could make the folder more organized if we wanted...                      
-    create_folder_cmd =f"earthengine create folder {gee_parent_folder} --parents"
-    # says on earthengine CLI you can use --parents but don't find that to be the case..?
     
-    # output: earthengine create folder -p ('projects/pyregence-ee/assets/op-tx/test_project',)
-    logger.info(create_folder_cmd)
+    # must first make directory tree in GEE assets
+    # ee cli docs say you can use -p flag to make necessary parents but error indicates that is a lie
+    # could make a function to handle this but for now will just assume one parent and one child will provided for the project
+    gee_dir_tree = f"projects/pyregence-ee/assets/{bucket}/{project_folder}" # we could make the folder more organized if we wanted...                      
+    create_parent_cmd =f"earthengine create folder {os.path.dirname(gee_dir_tree)}"
+    create_child_cmd = f"earthengine create folder {gee_dir_tree}"
+    logger.info(create_parent_cmd)
     proc = subprocess.Popen(
-            create_folder_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            create_parent_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
+    out, err = proc.communicate()
+    logger.info(create_child_cmd)
+    proc = subprocess.Popen(
+            create_child_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
     out, err = proc.communicate()
     
-    gee_asset_path = f"{gee_parent_folder}/{os.path.basename(gcs_file).split('.')[0]}"
-    logger.info(gee_asset_path)
+    # then upload gcs file to EE asset folder
+    gee_asset_path = f"{gee_dir_tree}/{os.path.basename(gcs_file).split('.')[0]}"
     gee_upload_cmd = f"earthengine upload {type.lower()} --asset_id={gee_asset_path} {gcs_file}"
     logger.info(gee_upload_cmd)
     proc = subprocess.Popen(
             gee_upload_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
     out, err = proc.communicate()
-    return
+    return gee_asset_path
 
 #%%
-# upload_gee(gcs_file=)
+# %%

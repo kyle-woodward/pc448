@@ -131,7 +131,7 @@ def main():
     # upload processed treatments to GCS
     treatment_gcs_file = upload_gcs(local_file=zipped_treatments,bucket='op-tx',project_folder='test-project')
     # upload GCS file to GEE
-    upload_gee(gcs_file=treatment_gcs_file,bucket='op-tx',project_folder='test_project',type='table')
+    treatment_asset = upload_gee(gcs_file=treatment_gcs_file,bucket='op-tx',project_folder='test_project',type='table')
 
     # make AOI if user chose not to provide
     if aoi_path is None:
@@ -149,7 +149,7 @@ def main():
         zipped_aoi_gcs = upload_gcs(local_file=zipped_aoi,bucket = 'op-tx',project_folder='test-project')
     # upload AOI from GCS to GEE
     ## EOB Friday - wrestling with creating necessary GEE folders
-    upload_gee(gcs_file=zipped_aoi_gcs,bucket='op-tx',project_folder='test_project',type='table')
+    aoi_gee_asset = upload_gee(gcs_file=zipped_aoi_gcs,bucket='op-tx',project_folder='test_project',type='table')
 
 if __name__ == '__main__':
     main()

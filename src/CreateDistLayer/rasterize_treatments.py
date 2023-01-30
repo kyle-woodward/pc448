@@ -3,14 +3,18 @@ import ee
 import yaml
 import argparse
 import logging
+import datetime
 
+repo_dir =  os.path.abspath(os.path.join(__file__ ,"../../..")) # three parents up
+date_id = datetime.datetime.utcnow().strftime("%Y-%m-%d").replace('-','') # like 20221216
 logging.basicConfig(
     format="%(asctime)s %(message)s",
     datefmt="%Y-%m-%d %I:%M:%S %p",
     level=logging.WARNING,
-    filename=os.path.join(os.path.dirname(__file__),'rasterize_treatments_ee_custom.log')
+    filename = os.path.join(repo_dir,"log",f"{date_id}.log")
 )
 logger = logging.getLogger(__name__)
+
 logger.setLevel(logging.INFO)
 
 try:
@@ -19,7 +23,7 @@ try:
 except:
     ee.Initialize()
 
-def ranks_to_dist(img:ee.Image):
+def code_rank_remap(img:ee.Image,to='DIST'):
     codes_list = ee.List([131, 132, 133,    # fire high sev | most recent to least                      
                         331, 332, 333,    # mech remove high sev | most recent to least               
                         121, 122, 123,    # all other                                          
@@ -48,11 +52,14 @@ def ranks_to_dist(img:ee.Image):
                     3, 2, 1])
 
     # treatments DIST ranks asset
-    treatments_ranks = ee.Image(img)
+    img = ee.Image(img)
     
     # remap back to DIST codes
-    dist_img = treatments_ranks.remap(ranks_list, codes_list, 0).rename('DIST')
-    return dist_img
+    if to == 'rank':
+        remap_img = img.remap(codes_list, ranks_list, 0).rename('ranks')
+    else:
+        remap_img = img.remap(ranks_list, codes_list, 0).rename('DIST')
+    return remap_img
 
 # Potential different avenue to the curernt rasterize_treatments.py - rasterize each treatments_ranks FC on ranks property into one ee.Image
 # testing if it works and is faster than local processing route
@@ -66,23 +73,10 @@ def main():
     )
 
     parser.add_argument(
-        "-c",
-        "--config",
-        type=str,
-        help="path to config file",
-    )
-    parser.add_argument(
         "-i",
         "--input",
         type=str,
         help="Earth Engine Asset path to dist w ranks file"
-    )
-
-    parser.add_argument(
-        "-o",
-        "--output",
-        type=str,
-        help="Earth Engine Asset output asset path"
     )
 
     parser.add_argument(
@@ -101,7 +95,7 @@ def main():
     args = parser.parse_args()
 
     # parse config file
-    with open(args.config) as file:
+    with open(os.path.join(repo_dir,'config.yml')) as file:
         config = yaml.full_load(file)
 
     geo_info = config["geo"]
@@ -113,20 +107,20 @@ def main():
     x_size, y_size = geo_info["dimensions"]
     crs = geo_info["crs"]
     
-    # for export geometry consistency
+    # default export geometry
     cc_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/landfire/cc")
     cc_img = ee.Image(
         cc_ic.filter(ee.Filter.eq("version", 200)).limit(1, "system:time_start").first()
     )
     
-    dist_w_ranks = ee.FeatureCollection(args.input) # plug EE asset path straight in insted of version-based file naming
-    ranksImg = dist_w_ranks.reduceToImage(['ranks'], ee.Reducer.max()).rename('ranks')
+    input = ee.FeatureCollection(args.input) # plug EE asset path straight in insted of version-based file naming
+    ranksImg = input.reduceToImage(['ranks'], ee.Reducer.max()).rename('ranks')
     
     # rasterizes on ranks or DIST field given user input to --rasterize_on
     if args.rasterize_on == "ranks":
         final = ranksImg
     elif args.rasterize_on == "DIST":
-        final = ranks_to_dist(ranksImg)
+        final = code_rank_remap(ranksImg)
     else:
         raise ValueError(f"{args.rasterize_on} is not a valid property to rasterize on. Valid properties: ranks, DIST ")
     
@@ -145,11 +139,14 @@ def main():
     else:
         raise RuntimeError(f"{asset_type} is not one of IMAGE or TABLE")
     
-    desc = os.path.basename(args.output).replace('/','_') 
+    desc = os.path.basename(args.input)+f'_{args.rasterize_on}'
+    asset_id = '/'.join([os.path.dirname(args.input), desc])
+    logger.info(desc)
+    logger.info(asset_id)
     task = ee.batch.Export.image.toAsset(
         image=final,
         description=desc,
-        assetId=args.output,
+        assetId=asset_id,
         region=AOI.geometry(),
         crsTransform=geo_t,
         crs=crs,
