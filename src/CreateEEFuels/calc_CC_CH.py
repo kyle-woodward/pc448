@@ -11,14 +11,18 @@ import yaml
 import argparse
 import logging
 from utils.ee_csv_parser import parse_txt, to_numeric
+import datetime
 
+repo_dir =  os.path.abspath(os.path.join(__file__ ,"../../..")) # three parents up
+date_id = datetime.datetime.utcnow().strftime("%Y-%m-%d").replace('-','') # like 20221216
 logging.basicConfig(
     format="%(asctime)s %(message)s",
     datefmt="%Y-%m-%d %I:%M:%S %p",
     level=logging.WARNING,
-    filename=os.path.join(os.path.dirname(__file__),'calc_CC_CH.log')
+    filename = os.path.join(repo_dir,"log",f"{date_id}.log")
 )
 logger = logging.getLogger(__name__)
+
 logger.setLevel(logging.INFO)
 
 try:
