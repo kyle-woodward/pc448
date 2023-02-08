@@ -1,18 +1,18 @@
 """
-Script used to calculate new Canopy Guide imgCollection for disturbed area using
-DIST, BPS, EVH, EVC, and EVT images
+Script used to calculate new FM40 values for disturbed area using
+DIST, BPS, FVH, FVC, and FVT images
 Usage:
-    $ python create_canopy_guide.py -c path/to/config
+    $ python calc_fm40.py -c path/to/config
 """
-import os
+import os 
 import ee
 import yaml
-import argparse
 import logging
 from utils.ee_csv_parser import parse_txt, to_numeric
+from utils.cloud_utils import poll_submitted_task
 import datetime
 
-repo_dir =  os.path.abspath(os.path.join(__file__ ,"../../..")) # three parents up
+repo_dir =  os.path.abspath(os.path.join(__file__ ,"../..")) 
 date_id = datetime.datetime.utcnow().strftime("%Y-%m-%d").replace('-','') # like 20221216
 logging.basicConfig(
     format="%(asctime)s %(message)s",
@@ -28,8 +28,8 @@ try:
     credentials = ee.ServiceAccountCredentials(email=None,key_file='/home/private-key.json')
     ee.Initialize(credentials)
 except:
-    ee.Initialize()
-    
+    ee.Initialize(project="pyregence-ee")
+
 # this function is currently not used because the encoded values are precomputed in cmb_table_qa
 # will keep just in case...
 def encode_table(table: ee.Dictionary):
@@ -88,43 +88,22 @@ def encode_table(table: ee.Dictionary):
     return encoded
 
 
-def main():
+def fm40(dist_img_path:str,fuels_source='firefactor',poll=False):
     """Main level function for generating new CBH and CBD"""
+    tasks=[]
+    # tiny test rectangle
+    test_rect = ee.Geometry.Polygon([[-121.03140807080943,39.716216195378465],
+                                    [-120.87347960401256,39.716216195378465],
+                                    [-120.87347960401256,39.798563143043246],
+                                    [-121.03140807080943,39.798563143043246],
+                                    [-121.03140807080943,39.716216195378465]])
     
-    # initalize new cli parser
-    parser = argparse.ArgumentParser(
-        description="CLI process for generating new canopy guide."
-    )
-
-    parser.add_argument(
-        "-c",
-        "--config",
-        type=str,
-        help="path to config file",
-    )
-
-    parser.add_argument(
-        "-d",
-        "--dist_img_path",
-        type=str,
-        help="asset path of input DIST img"
-
-    )
-
-    parser.add_argument(
-        "-o",
-        "--out_folder_path",
-        type=str,
-        help="asset path of output folder"
-
-    )
-    args = parser.parse_args()
-
-    dist_img_path = args.dist_img_path
-    out_folder_path = args.out_folder_path
+    # Set a default workload tag.
+    ee.data.setDefaultWorkloadTag('optx-compute')
     
     # parse config file
-    with open(args.config) as file:
+    config_file = os.path.join(repo_dir,'config.yml')
+    with open(config_file) as file:
         config = yaml.full_load(file)
 
     geo_info = config["geo"]
@@ -135,7 +114,8 @@ def main():
     scale = geo_info["scale"]
     x_size, y_size = geo_info["dimensions"]
     crs = geo_info["crs"]
-
+    
+    
     # define where the cmb tables can be found on cloud storage
     # these need to be the preprocessed tables from cmb_table_qa
     base_uri = "gs://landfire/LFTFCT_tables/cmb_zones_wneighbors/z{:02d}_CMB.csv"
@@ -149,7 +129,6 @@ def main():
 
     # define the image collections for the raster data needed for calculations
     bps_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/landfire/bps")
-    # fbfm40_ic = ee.ImageCollection("projects/pyregence-ee/assets/conus/landfire/fbfm40")
     # the actual values being used in the FM40 crosswalk are the FVH, FVC, FVT
     # however, the tables have EVH, EVC, EVT...
     # so variables are named as in the tables but note they are actually the F* layers
@@ -185,15 +164,23 @@ def main():
         .first()
     )
     
-    old_cg = ee.ImageCollection("projects/pyregence-ee/assets/conus/fuels/canopy_guide_2021_12_v1").select('newCanopy').mosaic()
+    # Use latest FireFactor or Pyrologix version as basleine FM40 to update from
+    if fuels_source == "firefactor":
+        oldfm40_img = ee.Image("projects/pyregence-ee/assets/conus/fuels/Fuels_FM40_WUI_IrrigatedConversion_2022_10") # Firefactor as baseline, pre Custom fuels edit
+    elif fuels_source == "pyrologix":
+        oldfm40_img = ee.Image("projects/pyregence-ee/assets/subconus/california/pyrologix/fm40/fm402022") #Pyrologix as baseline
+    else:
+        raise ValueError(f"{fuels_source} not a valid fuels data source. Valid data sources: firefactor, pyrologix")
+    # zone image to identify which pixel belong to zone
+    zone_img = ee.Image("projects/pyregence-ee/assets/conus/landfire/zones_image")
 
     # define disturbance image used for the DIST codes
     # this will update with new disturbance info
     # can update with version tags of code
     dist_img = ee.Image(
         f"{dist_img_path}"
-    ).unmask(0)
-
+    )#.unmask(0) # to ensure encoded imgs that get remapped to new FM40 lookup values only occur in the original masked DIST img pixels
+    
     # define a list of zone information
     # does a skip from 67 to 98...not sure why just the zone numbers
     #zones = list(range(1, 67)) + [98, 99] # all CONUS zones used for FireFactor.. check which zones your AOI falls in and provide them as a list
@@ -202,9 +189,8 @@ def main():
     zones_fc = ee.FeatureCollection("projects/pyregence-ee/assets/conus/landfire/zones")
     # instead of listing all Zone numbers in CONUS (Firefactor), we dynamically find zone numbers of zones intersecting the DIST img footprint
     zones = zones_fc.filterBounds(dist_img.geometry()).aggregate_array('ZONE_NUM').getInfo() # spatial intersect finding Landfire zones that overlap disturbance img footprint
-    logger.info(zones)
-    #zones = [5,6,12] # For AFF project, entire AOI falls in LF Zone 6
-
+    logger.info(f"LF zones overlapping AOI: {zones}")
+    
     # encode the images into unique codes
     # code will be a 16 digit value where each group of values
     # are the individual values from the images
@@ -226,9 +212,10 @@ def main():
 
     # define the collection to dump data to
     # this needs to be an image collection as each zone is exported individually
-    # output_ic = f"projects/pyregence-ee/assets/conus/fuels/canopy_guide_{version}"
-    output_ic = f"{out_folder_path}/canopy_guide_collection" # canopy guide is exported as zone-wise imgs into its own imageCollection, so we need to back up one path to the parent folder and make a canopy guide imgColl
-    os.popen(f"earthengine create collection {output_ic}")
+    out_folder_path = dist_img_path.replace('DIST','fuelscape') # {project-folder}/output/*_fuelscape/
+    os.popen(f"earthengine create folder {out_folder_path}")
+    output_ic = f"{out_folder_path}/fm40_collection" # canopy guide is exported as zone-wise imgs into its own imageCollection, so we need to back up one path to the parent folder and make a canopy guide imgColl
+    os.popen(f"earthengine create collection {output_ic}").read()
     
     # loop through each zone to do the FM40 calculation
     for zone in zones:
@@ -250,62 +237,62 @@ def main():
         # read in the encoded value list as numeric
         from_codes = to_numeric(ee.List(table.get("encoded")))
         # read the list of values to remap to as numeric
-        to_codes = to_numeric(ee.List(table.get("NewCanopy")))
+        to_codes = to_numeric(ee.List(table.get("NewFBFM40")))
 
-        # apply the remapping encoded values -> NewCanopy values
-        zone_newcanopy_remapped = encoded_img.remap(from_codes, to_codes) #non-matches return null (masked) value
-
-        dist_high_harvest = dist_img.selfMask().lte(333).bitwiseAnd(dist_img.selfMask().gte(331)) # high harvest = 1
-
-        # Initialize a CG raster of 1's and burn in actual remapped CG values overtop (CG=1 means leave fuels value as-is)
-        # then mask areas that are not current zone        
-        zone_newcanopy = (           
-            #ee.Image.constant(1) 
-            old_cg # AFF - starting with FFv1 canopy guide, not making CG from scratch
-            .where(dist_img.selfMask(), zone_newcanopy_remapped) #returns 1 if zone_newcanopy_remapped is null in disturbed area
-            .where(dist_high_harvest.eq(1),0) # zero out CG in high harvest disturbed areas
+        # apply the remapping encoded values -> new FM40 values
+        zone_fm40_remapped = encoded_img.remap(from_codes, to_codes) 
+        
+        # replace all values in old fm40 raster that are disturbed with new fm40 values
+        # then mask areas that are not current zone
+        zone_fm40 = (
+            oldfm40_img.where(dist_img.selfMask(), zone_fm40_remapped) # .where(dist_img.selfMask(), zone_fm40_remapped) returns input value if test value is false, i.e. if no 
             .updateMask(zone_img.eq(zone))
-            .rename("newCanopy")
-            .byte() #valid values are 0-3
+            .rename("new_fbfm40")
+            .uint16()
         )
-                
+
         # create an image with information of what happened where
-        # if disturbed and has new value flag = 0
-        # if not distubed (i.e. initial 1 value) flag = 1
-        # if disturbed and has no remapped code flag = 2
-        # if outside of zone flag = 3
+        # if disturbed and has new FM40 value flag = 0
+        # if not distubed (ie old FM40 value) flag = 1
+        # if disturbed and new FM40 has no remapped code flag = 2
+        # if outside of zone flag = 4
         flags = (
-            dist_img.Not() 
-            .where(zone_newcanopy.add(1).selfMask().eq(0), 2) # .add(1) so 0 is no longer a valid value and can be masked
+            dist_img.Not()
+            .where(zone_fm40.selfMask().eq(0), 2)
             .where(zone_img.neq(zone), 3)
             .updateMask(zone_img.selfMask())
             .uint8()
             .rename("qa_flags")
         )
 
-        # combine new CG layer and flags
-        zone_out = ee.Image.cat([zone_newcanopy, flags]).set(
+        # combine new FM40 layer and flags
+        zone_out = ee.Image.cat([zone_fm40, flags,]).set(
             "zone", zone
         )  # set zone metadata
 
         # set up export task
         # each zone will be all of CONUS with same projection/spatial extent
         # this is to prevent any pixel misalignment at edges of zone
-        asset_id = output_ic + f"/new_canopy_zone{zone:02d}"
-        task = ee.batch.Export.image.toAsset(
-            image=zone_out,
-            description=f"Zone{zone:02d}_canopy_guide_export_{os.path.basename(dist_img_path)}",
-            assetId=asset_id,
-            region=dist_img.geometry(),
-            scale=scale,
-            crs=crs,
-            maxPixels=1e12,
-            pyramidingPolicy={".default": "mode"},
-        )
+        with ee.data.workloadTagContext('optx-export'):
+            asset_id = output_ic + f"/FM40_zone{zone:02d}"
+            task = ee.batch.Export.image.toAsset(
+                image=zone_out,
+                description=f"Zone{zone:02d}_FM40_export_{os.path.basename(dist_img_path)}",
+                assetId=asset_id,
+                region=test_rect, #dist_img.geometry(),
+                crsTransform=geo_t, 
+                scale=scale,
+                crs=crs, 
+                maxPixels=1e12,
+                pyramidingPolicy={".default": "mode"},
+            )
+            task.start()  # kick of export task
         logger.info(f"Exporting {asset_id}")
-        task.start()
+        tasks.append(task)
     
+    logger.info(len(tasks))
+    if poll:
+        for task in tasks:
+            poll_submitted_task(task,1)
         
-# main level process if running as script
-if __name__ == "__main__":
-    main()
+    return output_ic

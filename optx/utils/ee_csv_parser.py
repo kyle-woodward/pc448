@@ -3,7 +3,7 @@ Script for defining functions for parsing csv data in earth engine
 """
 
 import ee
-ee.Initialize()
+ee.Initialize(project='pyregence-ee')
 
 def parse_txt(blob: ee.Blob, delim: str = ",", qualifier: str = '"') -> ee.Dictionary:
     """Function to parse csv objects from Cloud storage on EE

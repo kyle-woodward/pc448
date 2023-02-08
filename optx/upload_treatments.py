@@ -8,13 +8,13 @@ import yaml
 from pathlib import Path
 import datetime
 from shapely.geometry import Point
-from upload_utils import zip_shp, upload_gcs, upload_gee
+from utils.cloud_utils import zip_shp, upload_gcs, upload_gee, make_gee_folders
 '''
 Upload treatments shapefile containing 3-digit DIST codes and their mapped ranks code
 
 Usage: python upload_treatments.py -d path/to/repo/ -f path/to/one/treatment/shapefile.shp -a {optional} path/to/aoi/shapefile.shp
 '''
-repo_dir =  os.path.abspath(os.path.join(__file__ ,"../../..")) # three parents up
+repo_dir =  os.path.abspath(os.path.join(__file__ ,"../..")) 
 date_id = datetime.datetime.utcnow().strftime("%Y-%m-%d").replace('-','') # like 20221216
 logging.basicConfig(
     format="%(asctime)s %(message)s",
@@ -52,42 +52,27 @@ def make_aoi(gdf:gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     args:
         gdf: geopandas.GeoDataFrame
     
-    returns a GeoDataFrame
+    returns:
+        geopandas.GeoDataFrame
     """
     geom = gpd.GeoSeries(gdf['geometry'], crs='EPSG:5070') # CONUS Albers - units: meters
     env = geom.unary_union.envelope.buffer(7.5e3,join_style=2) # uses inherited geometries' crs unit for distance unit
     return gpd.GeoDataFrame({'FID':[1],'geometry':env},crs='EPSG:5070') # just doubling down since i've wrestled with this so much
 
 
-def main():
-
-    # initalize new cli parser
-    parser = argparse.ArgumentParser(
-        description="Upload processed treatments and AOI shapefiles to Earth Engine."
-    )
-
-    parser.add_argument(
-        "-f",
-        "--file",
-        type=str,
-        help="file path to treatment (shp)"
-    )
-
-    parser.add_argument(
-        "-a",
-        "--aoi",
-        type=str,
-        help="[optional] file path to AOI (shp)",
-        required=False
-    )
-    args = parser.parse_args()
+def upload_treatments(project_name:str,shapefile:str,aoi=None):
+    """
+    upload a treatment shapefile and a user or auto-generated AOI shapefile to GEE
     
-    shpfile_path = args.file
-    aoi_path = args.aoi
-    
-    # parse config file
-    config_path = os.path.join(repo_dir, 'config.yml')
-    
+    args:
+        project_name (str): project folder name to upload files to in GEE
+
+        shapefile (str): full local file path to the treatments shapefile 
+
+        aoi (default=None): full local file path to AOI shapefile 
+    returns:
+        GEE asset paths to treatments and AOI (tuple)
+    """
     # inputs folder - holds input treatment and AOI(if any) shapefiles
     # should already be made
     inputs_dir = Path(os.path.join(repo_dir, 'data','inputs')).resolve()
@@ -100,7 +85,7 @@ def main():
         processed_dir.mkdir(parents=True)
     
     # proceess input shapefile
-    shp = gpd.read_file(shpfile_path)
+    shp = gpd.read_file(shapefile)
     logger.info(f"input shp CRS:{shp.crs}")
     shp.to_crs(epsg=5070,inplace=True)
     
@@ -123,33 +108,36 @@ def main():
     w_ranks = ranks_remap(shp)
     
     # export processed shp
-    processed_shp_path = os.path.join(processed_dir,os.path.basename(shpfile_path))
-    logger.info(processed_shp_path)
+    processed_shp_path = os.path.join(processed_dir,os.path.basename(shapefile))
+    logger.info(f"output procesed shp: {processed_shp_path}")
     w_ranks.to_file(processed_shp_path)
     # zip up processed shp
     zipped_treatments = zip_shp(processed_shp_path)
+    
+    logger.info("Uploading treatments to GCS -> GEE")
+    # make required GEE dir tree
+    make_gee_folders(parent=project_name,children=['inputs','outputs'])
+
     # upload processed treatments to GCS
-    treatment_gcs_file = upload_gcs(local_file=zipped_treatments,bucket='op-tx',project_folder='test-project')
-    # upload GCS file to GEE
-    treatment_asset = upload_gee(gcs_file=treatment_gcs_file,bucket='op-tx',project_folder='test_project',type='table')
+    treatment_gcs_file = upload_gcs(zipped_treatments,f"gs://op-tx/{project_name}/inputs")
+    # upload it from GCS file to GEE
+    treatment_asset = upload_gee(treatment_gcs_file,f"projects/pyregence-ee/assets/op-tx/{project_name}/inputs")
 
     # make AOI if user chose not to provide
-    if aoi_path is None:
+    if aoi is None:
         logger.info("Generating AOI")
         aoi = make_aoi(shp)
         #export to .shp
-        aoi_path = os.path.join(processed_dir,os.path.basename(shpfile_path).replace('.shp','_AOI.shp'))
-        aoi.to_file(aoi_path)
-        # zip it
-        zipped_aoi = zip_shp(aoi_path)
-        # upload AOI to GCS       
-        zipped_aoi_gcs = upload_gcs(local_file=zipped_aoi,bucket = 'op-tx',project_folder='test-project')
+        aoi_shp = os.path.join(processed_dir,os.path.basename(shapefile).replace('.shp','_AOI.shp'))
+        aoi.to_file(aoi_shp)
+        # zip up .shp
+        zipped_aoi = zip_shp(aoi_shp)
     else:
-        zipped_aoi = zip_shp(aoi_path)
-        zipped_aoi_gcs = upload_gcs(local_file=zipped_aoi,bucket = 'op-tx',project_folder='test-project')
-    # upload AOI from GCS to GEE
-    ## EOB Friday - wrestling with creating necessary GEE folders
-    aoi_gee_asset = upload_gee(gcs_file=zipped_aoi_gcs,bucket='op-tx',project_folder='test_project',type='table')
-
-if __name__ == '__main__':
-    main()
+        zipped_aoi = zip_shp(aoi)
+    
+    logger.info("Uploading AOI to GCS -> GEE")
+    # upload AOI to GCS       
+    aoi_gcs_file = upload_gcs(zipped_aoi,f"gs://op-tx/{project_name}/inputs")
+    # upload it from GCS to GEE
+    aoi_asset = upload_gee(aoi_gcs_file,f"projects/pyregence-ee/assets/op-tx/{project_name}/inputs")
+    return treatment_asset, aoi_asset

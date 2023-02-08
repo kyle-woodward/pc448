@@ -4,8 +4,9 @@ import yaml
 import argparse
 import logging
 import datetime
+from utils.cloud_utils import poll_submitted_task
 
-repo_dir =  os.path.abspath(os.path.join(__file__ ,"../../..")) # three parents up
+repo_dir =  os.path.abspath(os.path.join(__file__ ,"../..")) # three parents up
 date_id = datetime.datetime.utcnow().strftime("%Y-%m-%d").replace('-','') # like 20221216
 logging.basicConfig(
     format="%(asctime)s %(message)s",
@@ -21,7 +22,7 @@ try:
     credentials = ee.ServiceAccountCredentials(email=None,key_file='/home/private-key.json')
     ee.Initialize(credentials)
 except:
-    ee.Initialize()
+    ee.Initialize(project='pyregence-ee')
 
 def code_rank_remap(img:ee.Image,to='DIST'):
     codes_list = ee.List([131, 132, 133,    # fire high sev | most recent to least                      
@@ -64,35 +65,18 @@ def code_rank_remap(img:ee.Image,to='DIST'):
 # Potential different avenue to the curernt rasterize_treatments.py - rasterize each treatments_ranks FC on ranks property into one ee.Image
 # testing if it works and is faster than local processing route
 # Load in treatment FCs with ranks property
-def main():
-    """rasterize dist FC on ranks or DIST property"""
-    
-    # initalize new cli parser
-    parser = argparse.ArgumentParser(
-        description="rasterize dist FC on ranks or DIST property"
-    )
+def rasterize(input:str,rasterize_on:str,aoi:str,poll=False):
+    """
+    Rasterize pre-existing treatments ee.FeatureCollection on 'ranks' or 'DIST' property
+    args:
+        input (str): treatments GEE asset path
 
-    parser.add_argument(
-        "-i",
-        "--input",
-        type=str,
-        help="Earth Engine Asset path to dist w ranks file"
-    )
+        rasterize_on (str): one of: 'ranks', 'DIST'
 
-    parser.add_argument(
-        "-r",
-        "--rasterize_on",
-        type=str,
-        help="property to rasterize on, one of DIST or ranks"
-    )
-
-    parser.add_argument(
-        "-a",
-        "--aoi",
-        type=str,
-        help="Earth Engine asset path to an aoi feature collection or template image with desired boundaries"
-    )
-    args = parser.parse_args()
+        aoi (str): AOI GEE asset path 
+    returns:
+        GEE asset path of resulting ee.Image (str)
+    """
 
     # parse config file
     with open(os.path.join(repo_dir,'config.yml')) as file:
@@ -113,47 +97,48 @@ def main():
         cc_ic.filter(ee.Filter.eq("version", 200)).limit(1, "system:time_start").first()
     )
     
-    input = ee.FeatureCollection(args.input) # plug EE asset path straight in insted of version-based file naming
-    ranksImg = input.reduceToImage(['ranks'], ee.Reducer.max()).rename('ranks')
+    input_fc = ee.FeatureCollection(input) # plug EE asset path straight in insted of version-based file naming
+    ranksImg = input_fc.reduceToImage(['ranks'], ee.Reducer.max()).rename('ranks')
     
     # rasterizes on ranks or DIST field given user input to --rasterize_on
-    if args.rasterize_on == "ranks":
+    if rasterize_on == "ranks":
         final = ranksImg
-    elif args.rasterize_on == "DIST":
+    elif rasterize_on == "DIST":
         final = code_rank_remap(ranksImg)
     else:
-        raise ValueError(f"{args.rasterize_on} is not a valid property to rasterize on. Valid properties: ranks, DIST ")
+        raise ValueError(f"{rasterize_on} is not a valid property to rasterize on. Valid properties: ranks, DIST ")
     
-    logger.info(final.bandNames().getInfo())
+    # logger.info(final.bandNames().getInfo())
    
     # Use aoi path provided to parameterize the region for export
-    aoi_path = args.aoi
-    if aoi_path == None:
+    
+    if aoi == None:
         AOI = cc_img.geometry() # no aoi path provided will result in exported img with whole CONUS boundary
     else: #user provides asset path to a image or featurecollection to use as the AOI
-        asset_type = ee.data.getAsset(aoi_path).get('type') # determine what it is
+        asset_type = ee.data.getAsset(aoi).get('type') # determine what it is
     if asset_type == "IMAGE":
-        AOI = ee.Image(aoi_path) # cast it
+        AOI = ee.Image(aoi) # cast it
     elif asset_type == "TABLE":
-        AOI = ee.FeatureCollection(aoi_path) # cast it
+        AOI = ee.FeatureCollection(aoi) # cast it
     else:
         raise RuntimeError(f"{asset_type} is not one of IMAGE or TABLE")
     
-    desc = os.path.basename(args.input)+f'_{args.rasterize_on}'
-    asset_id = '/'.join([os.path.dirname(args.input), desc])
-    logger.info(desc)
-    logger.info(asset_id)
-    task = ee.batch.Export.image.toAsset(
-        image=final,
-        description=desc,
-        assetId=asset_id,
-        region=AOI.geometry(),
-        crsTransform=geo_t,
-        crs=crs,
-        maxPixels=1e12,
-    )
-    task.start()  # kick off export
-    logger.info(f'export task started: {desc}')
-
-if __name__ =="__main__":
-    main()
+    desc = os.path.basename(input)+f'_{rasterize_on}'
+    asset_id = '/'.join([os.path.dirname(input).replace('input','output'), desc]) # DIST saved in outputs/
+    # set workload tag context with with 
+    with ee.data.workloadTagContext('optx-export'):
+        task = ee.batch.Export.image.toAsset(
+            image=final,
+            description=desc,
+            assetId=asset_id,
+            region=AOI.geometry(),
+            crsTransform=geo_t,
+            crs=crs,
+            maxPixels=1e12,
+        )
+        task.start()  # kick off export
+    logger.info(f'export task started: {asset_id}')
+    if poll:
+        poll_submitted_task(task,1)
+    
+    return asset_id
