@@ -1,0 +1,4034 @@
+#+TITLE: Look Up and Burn Fuel Models into an Existing Raster
+#+AUTHOR: David A. Schmidt
+#+DATE: Copyright © 2022 Spatial Informatics Group, LLC
+#+TAGS: deprecated
+
+* Preface
+This was originally developed for PC448_PNF_NEPA in November 2022 but the process is applicable anywhere. A lookup table must be created externally as a CSV file that maps post-treatment fuel models to various combinations of pre-treatment fuel model, CWHR types, and treatment types. The "Build a Lookup Table Template" section will produce a CSV file as a LUT template containing all the pre-treatment fuel models, CWHR types, and treatment types present in the input data, and leaving the post-treatment fuel models to be manually entered. *The new LUT must not contain a header or any incorrect post-treatment FBFM values like zeros, blanks, etc.* The 'Pixel count' and 'Translated' fields from the template must be deleted.
+
+Steps:
+1) each unique value of the 'CWHR_TYPE' field of the CWHR vector is assigned a numeric value which is saved in a dictionary (lut_CWHR_translate_d) that converts between numeric and text values
+2) these numeric CWHR values are then used to create a new CWHR raster which is saved (CWHR_r)
+3) each unique value of the 'Treat_Type' field of the treatment vector is assigned a numeric value which is saved in a dictionary (lut_tx_translate_d) that converts between numeric and text values
+4) these numeric treatment values are then used to create a new treatment raster which is saved (tx_r)
+5) produce a LUT template as a csv file (this will overwrite the existing file); the number of cells in each combination are printed as an indication of the overall importance of each combination to help prioritize cross-walking effort
+6) the lookup table is read into a dictionary
+7) anywhere there is a CWHR x pre-treatment fuel model x fuel treatment combination in the existing data that results in a hit in the lookup table will (potentially, depending on the post-treatment fuel model value in the LUT) result in a new post-treatment fuel model in the updated raster
+
+TODO:
+- don't hardcode raster extents in ~gdal_rasterize~ (x2), share ~pre_r~ and ~post_r~ paths from Python to bash block
+- what to do with CWHR and TX "none" values in "Build Lookup Table Template"
+- speed up execution in the 'Write New Post-tx Fuels Raster' section by avoiding the iteration over the entire array
+- finish saving summary information like unique values of inputs and counts of pre/post-tx fuel models, etc.;
+- finish the "new block" section- the goal here is to save a list of which combinations from the LUT were used or not, and also whether or not any combinations in the input data were not matched in the LUT
+
+The final product is a new post-treatment fuel model raster in which the pre-treatment fuel models are retained unless replaced by a matching pre-treatment fuel model x CWHR x fuel treatment entry from the lookup table. Some statistics and raw data are saved in an output notes files which is overwritten with each execution.
+
+I manually created the CWHR_type_names.csv file from https://wildlife.ca.gov/Data/CWHR/Wildlife-Habitats as a partial CWHR code-to-name crosswalk.
+
+The treatment shp must be in a projected CRS or the rasterization will fail!
+
+* (Optional: Project Pre-treatment FBFM Raster)
+This should not be necessary. Enter the intended new projection below.
+#+begin_src bash :results output
+#CRS=26910
+#gdal_edit.py -a_srs EPSG:$CRS /home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/pre-fbfm.tif
+#+end_src
+
+#+RESULTS:
+
+* (Optional: Project Post-treatment FBFM Raster)
+This should not be necessary. Enter the intended new projection below.
+#+begin_src bash :results output
+#CRS=26910
+#gdal_edit.py -a_srs EPSG:$CRS /home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/post-fbfm.tif
+#+end_src
+
+#+RESULTS:
+
+* Set Paths
+#+begin_src python :results silent :session shared
+
+##################
+#set LUT file path
+##################
+#LUT_f = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/existing_combinations_JM_11222022_cleaned.csv'
+LUT_f = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/master_pre-post_FBFM_LUT.csv'
+
+######################
+#set input file paths:
+######################
+pre_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/pre-fbfm.tif'
+
+CWHR_v = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/CWHR/EVeg_UTM10N_NAD83.shp'
+
+#tx_v = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments/Treatments_Plumas_Protect_Clip/Treatments_Plumas_Protect_Clip.shp'
+#tx_v = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments/Treatments_Plumas_Protect_20221212_revised/Treatments_Plumas_Protect_20221212_revised.shp'
+#tx_v = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_07Jan23/Treatments_Plumas_Protect_Alt1/Treatments_Plumas_Protect_Alt1.shp'
+#tx_v = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_07Jan23/Treatments_Plumas_Protect_Alt2/Treatments_Plumas_Protect_Alt2.shp'
+#tx_v = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_07Jan23/Treatments_Plumas_Protect_Alt3/Treatments_Plumas_Protect_Alt3.shp'
+#tx_v = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/Treatments_Plumas_Protect_Alt1/Treatments_Plumas_Protect_Alt1_26910.shp'
+#tx_v = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/Treatments_Plumas_Protect_Alt2/Treatments_Plumas_Protect_Alt2_26910.shp'
+#tx_v = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/Treatments_Plumas_Protect_Alt3/Treatments_Plumas_Protect_Alt3_26910.shp'
+tx_v = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/Treatments_Plumas_Protect_Alt1_v2/Treatments_Plumas_Protect_Alt1_v2_26910.shp'
+
+CWHR_xwalk = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/CWHR_type_names.csv'
+
+#######################
+#set output file paths:
+#######################
+CWHR_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/cwhr.tif'
+
+#tx_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/tx.tif'
+#tx_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/tx_20221212_revised.tif'
+#tx_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/plumas_tx_alt1.tif'
+#tx_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/plumas_tx_alt2.tif'
+#tx_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/plumas_tx_alt3.tif'
+#tx_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/plumas_tx_alt1.tif'
+#tx_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/plumas_tx_alt2.tif'
+#tx_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/plumas_tx_alt3.tif'
+tx_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/plumas_tx_alt1_v2.tif'
+
+#post_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/post-fbfm.tif'
+#post_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/post-fbfm_20221212_revised_v2.tif'
+#post_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/plumas_post-tx_fbfm_alt1.tif'
+#post_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/plumas_post-tx_fbfm_alt2.tif'
+#post_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/plumas_post-tx_fbfm_alt3.tif'
+#post_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/plumas_post-tx_fbfm_alt1.tif'
+#post_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/plumas_post-tx_fbfm_alt2.tif'
+#post_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/plumas_post-tx_fbfm_alt3.tif'
+post_r = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/plumas_post-tx_fbfm_alt1_v2.tif'
+
+#output_notes = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/output_notes.txt'
+#output_notes = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/output_notes_20221212_revised_v2.txt'
+#output_notes = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/output_notes_plumas_tx_alt1.txt'
+#output_notes = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/output_notes_plumas_tx_alt2.txt'
+#output_notes = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/output_notes_plumas_tx_alt3.txt'
+#output_notes = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/output_notes_plumas_tx_alt1.txt'
+#output_notes = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/output_notes_plumas_tx_alt2.txt'
+#output_notes = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/output_notes_plumas_tx_alt3.txt'
+output_notes = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/output_notes_plumas_tx_alt1_v2.txt'
+
+#LUT_template = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/lut_template.csv'
+#LUT_template = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/lut_template_20221212_revised_v3.csv'
+#LUT_template = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/lut_template_06Jan2023.csv'
+#LUT_template = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/lut_template_plumas_tx_alt1.csv'
+#LUT_template = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/lut_template_plumas_tx_alt2.csv'
+#LUT_template = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/lut_template_plumas_tx_alt3.csv'
+#LUT_template = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/lut_template_plumas_tx_alt1.csv'
+#LUT_template = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/lut_template_plumas_tx_alt2.csv'
+#LUT_template = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/lut_template_plumas_tx_alt3.csv'
+LUT_template = '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/lut_template_plumas_tx_alt1_v2.csv'
+#+end_src
+
+* Rasterize CWHR Vector
+CWHR_TYPE is the field of interest. Run this even if the CWHR vector has already been rasterized.
+
+#+begin_src python :results output :session shared :async
+import os
+import subprocess
+
+import geopandas as gpd
+from osgeo import ogr
+
+# the original CWHR shp remains untouched; no need for a new column
+# convert CWHR to numeric values and save the conversion table as a list where the list index is the new numeric value
+CWHR_gdf = gpd.read_file(CWHR_v)
+unique_CWHR_l = sorted(CWHR_gdf.CWHR_TYPE.unique())
+
+# will need to translate to numeric values using this dictionary later
+lut_CWHR_translate_d = {}
+for index, cwhr in enumerate(unique_CWHR_l):
+    lut_CWHR_translate_d[index] = cwhr
+
+# add a new empty column to the geodataframe
+CWHR_gdf.append(['CWHR_NUM'])
+
+# set CWHR to the numeric index value of the unique values list
+for index, row in CWHR_gdf.iterrows():
+    CWHR_gdf.at[index, 'CWHR_NUM'] = unique_CWHR_l.index(row['CWHR_TYPE'])
+
+# save the altered gdf as a temporary new shp
+CWHR_gdf.to_file(driver='ESRI Shapefile', filename='numeric_cwhr_temp.shp')
+
+# could have used gdal.rasterize
+# TODO: don't hardcode the '-te' arguments
+args = ['gdal_rasterize', \
+        '-ot', \
+        'Int16', \
+        '-a_nodata', \
+        '-999', \
+        '-tr', \
+        '30.0', \
+        '30.0', \
+        '-te', \
+        '603178.160', \
+        '4350600.117', \
+        '762778.160', \
+        '4475310.117`', \
+        '-a', \
+        'CWHR_NUM', \
+        '-l', \
+        'numeric_cwhr_temp', \
+        '-co', \
+        'COMPRESS=LZW', \
+        '-co', \
+        'PREDICTOR=1', \
+        'numeric_cwhr_temp.shp', \
+        CWHR_r]
+subprocess.call(args)
+
+driver = ogr.GetDriverByName('ESRI Shapefile')
+if os.path.exists('numeric_cwhr_temp.shp'):
+        driver.DeleteDataSource('numeric_cwhr_temp.shp')
+
+# use "w" the first time to overwrite
+print("CWHR codes: ", file=open(output_notes, 'w'))
+print(lut_CWHR_translate_d, file=open(output_notes, 'a'))
+#+end_src
+
+#+RESULTS:
+: <string>:19: FutureWarning: The frame.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.
+: /usr/local/lib/python3.10/dist-packages/geopandas/array.py:1406: UserWarning: CRS not set for some of the concatenation inputs. Setting output's CRS as NAD83 / UTM zone 10N (the single non-null crs provided).
+:   warnings.warn(
+: 0...10...20...30...40...50...60...70...80...90...100 - done.
+
+* Rasterize Treatment Vector
+CATEGORY is the field of interest. Run this even if the treatment vector has already been rasterized.
+
+#+begin_src python :results output :session shared
+import geopandas as gpd
+from osgeo import ogr
+import os
+import subprocess
+
+#tx_col = 'Treat_Type'
+#tx_col = 'TREATMENT'
+tx_col = 'CATEGORY'
+# the original tx shp remains untouched; no need for a new column
+# convert tx to numeric values and save the conversion table as a list where the list index is the new numeric value
+tx_gdf = gpd.read_file(tx_v)
+unique_tx_l = sorted(tx_gdf[tx_col].unique())
+print("unique treatments:", unique_tx_l)
+
+lut_tx_translate_d = {}
+for index, tx in enumerate(unique_tx_l):
+    lut_tx_translate_d[index] = tx
+
+# add a new empty column to the geodataframe
+tx_gdf.append(['tx_num'])
+
+# set tx_num to the numeric index value of the unique values list
+for index, row in tx_gdf.iterrows():
+    tx_gdf.at[index, 'tx_num'] = unique_tx_l.index(row[tx_col])
+
+# save the altered gdf as a temporary new shp
+tx_gdf.to_file(driver='ESRI Shapefile', filename='/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/numeric_tx_temp.shp')
+#tx_gdf.to_file(driver='ESRI Shapefile', filename='numeric_tx_temp.shp')
+
+# could have used gdal.rasterize
+# TODO: don't hardcode the '-te' arguments
+args = ['gdal_rasterize', \
+        '-ot', \
+        'Int16', \
+        '-a_nodata', \
+        '-999', \
+        '-tr', \
+        '30.0', \
+        '30.0', \
+        '-te', \
+        '603178.160', \
+        '4350600.117', \
+        '762778.160', \
+        '4475310.117`', \
+        '-a', \
+        'tx_num', \
+        '-l', \
+        'numeric_tx_temp', \
+        '-co', \
+        'COMPRESS=LZW', \
+        '-co', \
+        'PREDICTOR=1', \
+        '/home/dschmidt/Documents/PC448_PNF_NEPA/post_treatment_fuels/treatments_12Jan23/numeric_tx_temp.shp', \
+        tx_r]
+print("rasterize result:", subprocess.call(args))
+
+driver = ogr.GetDriverByName('ESRI Shapefile')
+#if os.path.exists('numeric_tx_temp.shp'):
+#        driver.DeleteDataSource('numeric_tx_temp.shp')
+
+print(lut_tx_translate_d)
+print("treatment codes: ", file=open(output_notes, 'a'))
+print(lut_tx_translate_d, file=open(output_notes, 'a'))
+#+end_src
+
+#+RESULTS:
+#+begin_example
+ob_comint_async_python_start_51aebd17a0599eaa3a7c23c6f896dced
+<string>:19: FutureWarning: The frame.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.
+/usr/local/lib/python3.10/dist-packages/geopandas/array.py:1406: UserWarning: CRS not set for some of the concatenation inputs. Setting output's CRS as NAD83 / UTM zone 10N (the single non-null crs provided).
+  warnings.warn(
+0...10...20...30...40...50...60...70...80...90...100 - done.
+ob_comint_async_python_end_51aebd17a0599eaa3a7c23c6f896dced
+>>> unique treatments: ['Manual', 'Mechanical']
+/tmp/babel-ASxIC8/python-7Kt6E0:20: FutureWarning: The frame.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.
+  tx_gdf.append(['tx_num'])
+/usr/local/lib/python3.10/dist-packages/geopandas/array.py:1406: UserWarning: CRS not set for some of the concatenation inputs. Setting output's CRS as NAD83 / UTM zone 10N (the single non-null crs provided).
+  warnings.warn(
+0...10...20...30...40...50...60...70...80...90...100 - done.
+rasterize result: 0
+{0: 'Manual', 1: 'Mechanical'}
+#+end_example
+
+* Build a Lookup Table Template
+This will list and save all the unique pre-treatment fuel models x CWHR x fuel treatment combinations present in the AOI.
+As written, the previous blocks (rasterize tx and rasterize CWHR) need to be executed first to produce lut_tx_translate_d and lut_CWHR_translate_d.
+This block needs to be run even if the LUT template is unneeded.
+
+#+begin_src python :results output :session shared
+import csv
+from osgeo import gdal
+import numpy as np
+import rasterio
+
+# load the existing data rasters into arrays
+pre_ds = gdal.Open(pre_r)
+cwhr_ds = gdal.Open(CWHR_r)
+tx_ds = gdal.Open(tx_r)
+pre_band = pre_ds.GetRasterBand(1)
+cwhr_band = cwhr_ds.GetRasterBand(1)
+tx_band = tx_ds.GetRasterBand(1)
+pre_a = pre_band.ReadAsArray()
+cwhr_a = cwhr_band.ReadAsArray()
+tx_a = tx_band.ReadAsArray()
+
+# load the CWHR type-name xwalk csv file into a dictionary
+CWHR_names_d = {}
+with open(CWHR_xwalk, 'r') as CWHR_names:
+    reader = csv.reader(CWHR_names)
+    for row in reader:
+       CWHR_names_d = {rows[0]:rows[1] for rows in reader}
+
+print(CWHR_names_d)
+
+# need to convert CWHR and treatment raster values back to strings for LUT template
+# convert cwhr_a and tx_a to text values using the saved dictionaries
+cwhr_text_a = np.vectorize(lut_CWHR_translate_d.get)(cwhr_a)
+tx_text_a = np.vectorize(lut_tx_translate_d.get)(tx_a)
+
+# combine these into a new text array
+# two-step combination to get all three variables
+combined_text_a = np.char.add(pre_a.astype(str), cwhr_text_a.astype(str))
+combined_text_a = np.char.add(combined_text_a.astype(str), tx_text_a.astype(str))
+print("total number of unique text combinations: ", np.size(np.unique(combined_text_a)), file=open(output_notes, 'a'))
+print("list of unique text combinations with counts: ", np.asarray(np.unique(combined_text_a, return_counts=True)).T, file=open(output_notes, 'a'))
+
+unique_text_combinations, counts = np.unique(combined_text_a, return_counts=True)
+print("sum of counts (should match total number of AOI raster pixels): ", counts.sum(), file=open(output_notes, 'a'))
+
+with open(LUT_template, 'w') as out:
+    writer = csv.writer(out)
+    writer.writerow(['Unique combination', 'Pre-tx FBFM', 'CWHR', 'CWHR Name', 'TX', 'Pixel count'])
+
+    for unique_text_combination, count in zip(unique_text_combinations, counts):
+        print(unique_text_combination, count)
+        # if first digit < 9, get first 3 digits as FM, remainder is CWHR and tx
+        if (int(unique_text_combination[:1]) < 9):
+            FM = unique_text_combination[0:3]
+            CWHR = unique_text_combination[3:6]
+            if (CWHR in CWHR_names_d):
+                CWHR_name = CWHR_names_d[CWHR]
+            else:
+                print(CWHR, "is not a key in CWHR_names_d")
+            #try:
+            #    CWHR_name = CWHR_names_d[CWHR]
+            #except:
+            #    print(CWHR_name, " is not a key in CWHR_names_d")
+            TX = unique_text_combination[6:]
+        # first 2 digits is FM, remainder is CWHR and tx
+        else:
+            FM = unique_text_combination[0:2]
+            CWHR = unique_text_combination[2:5]
+            if (CWHR in CWHR_names_d):
+                CWHR_name = CWHR_names_d[CWHR]
+            else:
+                print(CWHR, "is not a key in CWHR_names_d")
+            #try:
+            #    CWHR_name = CWHR_names_d[CWHR]
+            #except:
+            #    print(CWHR_name, " is not a key in CWHR_names_d")
+            TX = unique_text_combination[5:]
+        #print(CWHR, CWHR_names_d[CWHR])
+        writer.writerow([unique_text_combination, FM, CWHR, CWHR_name, TX, count])
+print("finished")
+#+end_src
+
+#+RESULTS:
+#+begin_example
+{'AGS': 'Annual Grassland', 'ASP': 'Aspen', 'BAR': 'Barren', 'BOP': 'Blue Oak-Foothill Pine', 'BOW': 'Blue Oak Woodland', 'COW': 'Coastal Oak Woodland', 'CPC': 'Close-Cone Pine-Cypress', 'CRP': 'Cropland', 'DFR': 'Douglas-fir', 'DRI': 'Desert Riparian', 'EPN': 'Eastside Pine', 'EUC': 'Eucalyptus', 'JPN': 'Jeffrey Pine', 'JST': 'Joshua Tree', 'JUN': 'Juniper', 'KMC': 'Klamath Mixed Conifer', 'LAC': 'Lacustrine', 'LPN': 'Lodgepole Pine', 'LSG': 'Low Sage', 'MCH': 'Mixed Chaparral', 'MCP': 'Montane Chaparral', 'MHC': 'Montane Hardwood-Conifer', 'MHW': 'Montane Hardwood', 'MRI': 'Montane Riparian', 'PGS': 'Perennial Grassland', 'PJN': 'Pinyon-Juniper', 'POS': 'Palm Oasis', 'PPN': 'Ponderosa Pine', 'RDW': 'Redwood', 'RFR': 'Red Fir', 'RIV': 'Riverine', 'SCN': 'Subalpine Conifer', 'SGB': 'Sagebrush', 'SMC': 'Sierran Mixed Conifer', 'URB': 'Urban', 'VOW': 'Valley Oak Woodland', 'VRI': 'Valley Foothill Riparian', 'WFR': 'White Fir', 'WTM': 'Wet Meadow'}
+101AGSManual 7
+101AGSMechanical 123
+101BARNone 117
+101BOPManual 1
+101BOPMechanical 1
+101CRPNone 11
+101DFRMechanical 1
+101EPNManual 2
+101EPNMechanical 19
+101LACNone 12
+101LSGMechanical 7
+101MCHManual 1
+101MCHMechanical 32
+101MCPManual 27
+101MCPMechanical 144
+101MHCManual 28
+101MHCMechanical 299
+101MHWManual 20
+101MHWMechanical 411
+101MRIManual 30
+101MRIMechanical 1
+101NoneNone 412037
+Non is not a key in CWHR_names_d
+101PGSManual 16
+101PGSMechanical 70
+101PGSNone 1
+101PPNMechanical 117
+101RFRManual 3
+101RFRMechanical 6
+101RFRNone 1
+101SGBMechanical 16
+101SMCManual 44
+101SMCMechanical 558
+101SMCNone 5
+101WFRManual 6
+101WFRMechanical 82
+101WTMManual 19
+101WTMMechanical 4
+102AGSManual 150
+102AGSMechanical 405
+102AGSNone 12
+102ASPManual 4
+102ASPMechanical 7
+102BARNone 391
+102BOPManual 18
+102BOPMechanical 129
+102CRPNone 36
+102DFRManual 5
+102DFRMechanical 3
+102EPNManual 63
+102EPNMechanical 403
+102JPNMechanical 3
+102LACNone 176
+102LPNManual 1
+102LPNMechanical 4
+102LSGMechanical 42
+102MCHManual 10
+102MCHMechanical 111
+102MCHNone 45
+102MCPManual 67
+102MCPMechanical 562
+102MCPNone 159
+102MHCManual 124
+102MHCMechanical 1712
+102MHCNone 77
+102MHWManual 222
+102MHWMechanical 2272
+102MHWNone 87
+102MRIManual 65
+102MRIMechanical 58
+102MRINone 25
+102NoneNone 498923
+Non is not a key in CWHR_names_d
+102PGSManual 1
+102PGSMechanical 36
+102PGSNone 28
+102PPNManual 52
+102PPNMechanical 1058
+102PPNNone 50
+102RFRMechanical 25
+102RFRNone 7
+102SGBManual 27
+102SGBMechanical 171
+102SMCManual 373
+102SMCMechanical 3337
+102SMCNone 89
+102URBNone 8
+102WFRManual 40
+102WFRMechanical 569
+102WFRNone 7
+102WTMManual 35
+102WTMMechanical 10
+102WTMNone 2
+103AGSManual 5
+103AGSMechanical 189
+103AGSNone 3
+103ASPMechanical 1
+103BARNone 509
+103BOPManual 2
+103BOPMechanical 29
+103CRPNone 26
+103DFRMechanical 1
+103EPNManual 2
+103EPNMechanical 41
+103JPNManual 2
+103JPNMechanical 86
+103JPNNone 21
+103LACNone 25
+103MCHManual 26
+103MCHMechanical 524
+103MCHNone 34
+103MCPManual 26
+103MCPMechanical 213
+103MCPNone 18
+103MHCManual 24
+103MHCMechanical 704
+103MHCNone 23
+103MHWManual 13
+103MHWMechanical 408
+103MHWNone 54
+103MRIManual 3
+103MRINone 1
+103NoneNone 77180
+Non is not a key in CWHR_names_d
+103PGSManual 1
+103PGSMechanical 92
+103PGSNone 3
+103PPNManual 17
+103PPNMechanical 271
+103PPNNone 16
+103SGBManual 13
+103SGBMechanical 56
+103SMCManual 41
+103SMCMechanical 1103
+103SMCNone 109
+103WFRManual 3
+103WFRMechanical 5
+121AGSManual 31
+121AGSMechanical 183
+121AGSNone 1
+121BARNone 243
+121BOPManual 5
+121BOPMechanical 18
+121CRPNone 159
+121DFRManual 1
+121DFRMechanical 2
+121EPNManual 24
+121EPNMechanical 229
+121JPNMechanical 7
+121JPNNone 1
+121LACNone 57
+121LPNManual 1
+121LSGManual 1
+121LSGMechanical 200
+121MCHManual 9
+121MCHMechanical 84
+121MCHNone 1
+121MCPManual 16
+121MCPMechanical 147
+121MCPNone 79
+121MHCManual 53
+121MHCMechanical 305
+121MHCNone 10
+121MHWManual 30
+121MHWMechanical 142
+121MRIManual 15
+121MRIMechanical 26
+121MRINone 29
+121NoneNone 311552
+Non is not a key in CWHR_names_d
+121PGSManual 3
+121PGSMechanical 22
+121PGSNone 17
+121PPNManual 11
+121PPNMechanical 49
+121PPNNone 5
+121RFRManual 4
+121RFRMechanical 12
+121RFRNone 208
+121SGBManual 19
+121SGBMechanical 572
+121SMCManual 105
+121SMCMechanical 736
+121SMCNone 187
+121URBNone 7
+121WFRManual 13
+121WFRMechanical 123
+121WFRNone 38
+121WTMManual 2
+121WTMMechanical 6
+122AGSManual 474
+122AGSMechanical 3768
+122AGSNone 16
+122ASPManual 7
+122ASPMechanical 7
+122BARNone 1676
+122BOPManual 4
+122CRPNone 615
+122EPNManual 503
+122EPNMechanical 3135
+122JPNManual 2
+122JPNMechanical 39
+122JPNNone 14
+122LACNone 1059
+122LPNManual 7
+122LPNMechanical 6
+122LSGManual 15
+122LSGMechanical 84
+122MCHManual 3
+122MCHMechanical 16
+122MCHNone 37
+122MCPManual 964
+122MCPMechanical 3237
+122MCPNone 89
+122MHCManual 73
+122MHCMechanical 413
+122MHCNone 122
+122MHWManual 73
+122MHWMechanical 617
+122MHWNone 74
+122MRIManual 394
+122MRIMechanical 423
+122MRINone 9
+122NoneNone 786652
+Non is not a key in CWHR_names_d
+122PGSManual 32
+122PGSMechanical 158
+122PGSNone 64
+122PPNManual 58
+122PPNMechanical 278
+122PPNNone 88
+122RFRManual 278
+122RFRMechanical 700
+122RIVNone 1
+122SCNManual 5
+122SGBManual 373
+122SGBMechanical 2960
+122SMCManual 638
+122SMCMechanical 4919
+122SMCNone 239
+122URBNone 30
+122WFRManual 190
+122WFRMechanical 2243
+122WFRNone 3
+122WTMManual 111
+122WTMMechanical 27
+122WTMNone 17
+123NoneNone 1
+Non is not a key in CWHR_names_d
+141AGSMechanical 41
+141BARNone 179
+141BOPManual 11
+141BOPMechanical 114
+141CRPNone 2
+141EPNMechanical 76
+141JPNManual 9
+141JPNMechanical 84
+141LACNone 1
+141LPNMechanical 3
+141MCHManual 10
+141MCHMechanical 174
+141MCHNone 2
+141MCPManual 23
+141MCPMechanical 265
+141MCPNone 15
+141MHCManual 24
+141MHCMechanical 362
+141MHCNone 11
+141MHWManual 6
+141MHWMechanical 212
+141MHWNone 13
+141MRIManual 1
+141MRINone 2
+141NoneNone 319026
+Non is not a key in CWHR_names_d
+141PGSManual 1
+141PGSMechanical 25
+141PGSNone 6
+141PPNManual 12
+141PPNMechanical 137
+141RFRManual 1
+141RFRMechanical 15
+141RFRNone 5
+141SGBManual 1
+141SGBMechanical 20
+141SMCManual 59
+141SMCMechanical 909
+141SMCNone 41
+141WFRManual 14
+141WFRMechanical 202
+141WFRNone 6
+142AGSManual 12
+142AGSMechanical 132
+142ASPManual 2
+142BARNone 329
+142BOPManual 1
+142BOPMechanical 20
+142CRPNone 14
+142DFRManual 1
+142DFRMechanical 2
+142EPNManual 112
+142EPNMechanical 968
+142JPNManual 28
+142JPNMechanical 515
+142LACNone 5
+142LPNMechanical 3
+142MCHManual 21
+142MCHMechanical 235
+142MCHNone 13
+142MCPManual 95
+142MCPMechanical 1935
+142MCPNone 171
+142MHCManual 336
+142MHCMechanical 4041
+142MHCNone 346
+142MHWManual 172
+142MHWMechanical 1925
+142MHWNone 58
+142MRIManual 14
+142MRIMechanical 25
+142MRINone 32
+142NoneNone 475822
+Non is not a key in CWHR_names_d
+142PGSManual 5
+142PGSMechanical 65
+142PGSNone 4
+142PPNManual 113
+142PPNMechanical 1674
+142PPNNone 99
+142RFRMechanical 5
+142RFRNone 79
+142SGBManual 10
+142SGBMechanical 162
+142SMCManual 3311
+142SMCMechanical 27534
+142SMCNone 3542
+142URBNone 2
+142WFRManual 481
+142WFRMechanical 4736
+142WFRNone 882
+142WTMMechanical 1
+142WTMNone 2
+143BARNone 2
+143MCPMechanical 1
+143NoneNone 23233
+Non is not a key in CWHR_names_d
+143WFRMechanical 2
+144AGSManual 114
+144AGSMechanical 1937
+144AGSNone 15
+144BARNone 1270
+144BOPManual 32
+144BOPMechanical 299
+144CPCMechanical 10
+144CRPNone 4
+144DFRMechanical 1
+144EPNManual 141
+144EPNMechanical 2813
+144JPNManual 16
+144JPNMechanical 224
+144JPNNone 192
+144LACNone 50
+144LPNManual 4
+144LPNMechanical 1
+144LSGMechanical 3
+144MCHManual 135
+144MCHMechanical 1694
+144MCHNone 367
+144MCPManual 528
+144MCPMechanical 4280
+144MCPNone 214
+144MHCManual 119
+144MHCMechanical 1957
+144MHCNone 131
+144MHWManual 93
+144MHWMechanical 1087
+144MHWNone 74
+144MRIManual 18
+144MRIMechanical 29
+144NoneNone 446127
+Non is not a key in CWHR_names_d
+144PGSManual 14
+144PGSMechanical 480
+144PGSNone 49
+144PPNManual 59
+144PPNMechanical 1488
+144PPNNone 263
+144RFRManual 84
+144RFRMechanical 65
+144SCNManual 1
+144SGBManual 98
+144SGBMechanical 1248
+144SMCManual 517
+144SMCMechanical 8163
+144SMCNone 504
+144URBNone 6
+144WFRManual 47
+144WFRMechanical 802
+144WTMManual 5
+144WTMMechanical 3
+145AGSManual 3
+145AGSMechanical 95
+145AGSNone 14
+145ASPMechanical 1
+145BARNone 240
+145BOPMechanical 18
+145EPNManual 30
+145EPNMechanical 601
+145JPNManual 39
+145JPNMechanical 379
+145JPNNone 649
+145LACNone 25
+145MCHManual 5
+145MCHMechanical 351
+145MCHNone 1575
+145MCPManual 66
+145MCPMechanical 566
+145MCPNone 575
+145MHCManual 18
+145MHCMechanical 175
+145MHCNone 320
+145MHWManual 29
+145MHWMechanical 78
+145MHWNone 309
+145MRIManual 14
+145MRIMechanical 25
+145MRINone 5
+145NoneNone 65196
+Non is not a key in CWHR_names_d
+145PGSManual 4
+145PGSMechanical 87
+145PGSNone 72
+145PPNManual 45
+145PPNMechanical 1429
+145PPNNone 1738
+145RIVNone 1
+145SGBManual 15
+145SGBMechanical 140
+145SMCManual 297
+145SMCMechanical 3129
+145SMCNone 1886
+145URBNone 3
+145WFRManual 15
+145WFRMechanical 58
+145WFRNone 1
+145WTMManual 1
+145WTMMechanical 2
+147BARNone 4
+147EPNMechanical 29
+147MCPMechanical 2
+147NoneNone 3318
+Non is not a key in CWHR_names_d
+147SGBMechanical 1
+147WFRManual 1
+161AGSManual 11
+161AGSMechanical 54
+161ASPManual 3
+161ASPMechanical 2
+161BARNone 319
+161CRPNone 13
+161EPNManual 34
+161EPNMechanical 106
+161JPNManual 2
+161JPNMechanical 269
+161LACNone 30
+161LSGManual 1
+161MCHManual 5
+161MCHMechanical 60
+161MCPManual 322
+161MCPMechanical 3805
+161MCPNone 153
+161MHCManual 180
+161MHCMechanical 2740
+161MHCNone 76
+161MHWManual 95
+161MHWMechanical 1380
+161MHWNone 4
+161MRIManual 58
+161MRIMechanical 38
+161MRINone 6
+161NoneNone 1368344
+Non is not a key in CWHR_names_d
+161PGSManual 26
+161PGSMechanical 42
+161PGSNone 2
+161PPNManual 54
+161PPNMechanical 1618
+161PPNNone 137
+161RFRManual 1470
+161RFRMechanical 408
+161RFRNone 68
+161SCNManual 50
+161SGBManual 27
+161SGBMechanical 77
+161SMCManual 3578
+161SMCMechanical 32204
+161SMCNone 4681
+161WFRManual 517
+161WFRMechanical 9044
+161WFRNone 1562
+161WTMManual 4
+162AGSManual 1
+162AGSMechanical 39
+162BARNone 37
+162BOPMechanical 2
+162CPCMechanical 2
+162DFRManual 2
+162DFRMechanical 2
+162EPNManual 49
+162EPNMechanical 1343
+162JPNMechanical 19
+162JPNNone 3
+162LACNone 7
+162LPNManual 1
+162LPNMechanical 2
+162MCHManual 3
+162MCHMechanical 45
+162MCHNone 2
+162MCPManual 1
+162MCPMechanical 114
+162MCPNone 12
+162MHCManual 33
+162MHCMechanical 258
+162MHCNone 57
+162MHWManual 22
+162MHWMechanical 137
+162MHWNone 14
+162MRIManual 4
+162MRIMechanical 1
+162MRINone 15
+162NoneNone 192674
+Non is not a key in CWHR_names_d
+162PGSManual 5
+162PGSMechanical 27
+162PGSNone 16
+162PPNManual 15
+162PPNMechanical 174
+162PPNNone 18
+162RFRMechanical 1
+162SGBManual 1
+162SGBMechanical 10
+162SMCManual 237
+162SMCMechanical 2539
+162SMCNone 191
+162URBNone 1
+162WFRManual 5
+162WFRMechanical 64
+162WFRNone 9
+162WTMMechanical 1
+163BARNone 10
+163BOPMechanical 1
+163LACNone 3
+163MCHManual 1
+163MCHMechanical 10
+163MHCMechanical 15
+163MHWManual 5
+163MHWMechanical 36
+163NoneNone 15422
+Non is not a key in CWHR_names_d
+163PPNManual 4
+163PPNMechanical 22
+165AGSManual 222
+165AGSMechanical 1625
+165AGSNone 31
+165ASPManual 34
+165ASPMechanical 25
+165BARNone 1839
+165BOPManual 11
+165BOPMechanical 42
+165EPNManual 3825
+165EPNMechanical 46360
+165JPNManual 122
+165JPNMechanical 1323
+165JPNNone 443
+165LACNone 288
+165LPNManual 338
+165LPNMechanical 341
+165MCHManual 50
+165MCHMechanical 544
+165MCHNone 975
+165MCPManual 3430
+165MCPMechanical 23482
+165MCPNone 1925
+165MHCManual 2882
+165MHCMechanical 15987
+165MHCNone 2561
+165MHWManual 896
+165MHWMechanical 6266
+165MHWNone 1282
+165MRIManual 842
+165MRIMechanical 593
+165MRINone 91
+165NoneNone 2674103
+Non is not a key in CWHR_names_d
+165PGSManual 58
+165PGSMechanical 462
+165PGSNone 484
+165PPNManual 1177
+165PPNMechanical 8538
+165PPNNone 4476
+165RFRManual 888
+165RFRMechanical 3165
+165RFRNone 1
+165RIVNone 6
+165SGBManual 129
+165SGBMechanical 1963
+165SMCManual 66284
+165SMCMechanical 279566
+165SMCNone 58940
+165URBNone 28
+165WFRManual 21925
+165WFRMechanical 82579
+165WFRNone 3619
+165WTMManual 74
+165WTMMechanical 62
+165WTMNone 32
+181AGSManual 21
+181AGSMechanical 1556
+181AGSNone 2
+181ASPManual 6
+181ASPMechanical 5
+181BARNone 2612
+181BOPManual 5
+181BOPMechanical 32
+181CPCMechanical 7
+181DFRManual 4
+181DFRMechanical 1
+181EPNManual 83
+181EPNMechanical 1575
+181JPNManual 7
+181JPNMechanical 67
+181JPNNone 89
+181LACNone 184
+181LPNMechanical 2
+181MCHManual 39
+181MCHMechanical 480
+181MCHNone 192
+181MCPManual 298
+181MCPMechanical 1437
+181MCPNone 73
+181MHCManual 100
+181MHCMechanical 384
+181MHCNone 37
+181MHWManual 75
+181MHWMechanical 801
+181MHWNone 19
+181MRIManual 28
+181MRIMechanical 20
+181MRINone 3
+181NoneNone 528532
+Non is not a key in CWHR_names_d
+181PGSManual 4
+181PGSMechanical 21
+181PGSNone 21
+181PPNManual 50
+181PPNMechanical 332
+181PPNNone 39
+181RFRManual 4
+181RFRMechanical 13
+181RFRNone 68
+181RIVNone 1
+181SGBManual 25
+181SGBMechanical 938
+181SMCManual 518
+181SMCMechanical 2859
+181SMCNone 111
+181URBNone 3
+181WFRManual 53
+181WFRMechanical 357
+181WFRNone 7
+182AGSManual 8
+182AGSMechanical 31
+182ASPManual 3
+182BARNone 91
+182BOPMechanical 13
+182CPCMechanical 1
+182CRPNone 6
+182DFRManual 9
+182DFRMechanical 50
+182EPNManual 5
+182EPNMechanical 96
+182JPNMechanical 1
+182LACNone 13
+182LPNManual 5
+182MCHManual 21
+182MCHMechanical 465
+182MCPManual 337
+182MCPMechanical 765
+182MCPNone 25
+182MHCManual 191
+182MHCMechanical 1677
+182MHCNone 1
+182MHWManual 217
+182MHWMechanical 2996
+182MRIManual 68
+182MRIMechanical 10
+182MRINone 3
+182NoneNone 265840
+Non is not a key in CWHR_names_d
+182PGSManual 13
+182PGSMechanical 4
+182PGSNone 3
+182PPNManual 150
+182PPNMechanical 1743
+182PPNNone 3
+182RFRManual 177
+182RFRMechanical 707
+182RFRNone 117
+182SGBManual 1
+182SGBMechanical 13
+182SMCManual 484
+182SMCMechanical 2734
+182SMCNone 41
+182URBNone 9
+182WFRManual 267
+182WFRMechanical 1886
+182WFRNone 74
+182WTMManual 9
+182WTMMechanical 1
+183AGSManual 99
+183AGSMechanical 166
+183AGSNone 6
+183ASPManual 33
+183ASPMechanical 7
+183BARNone 197
+183BOPManual 2
+183BOPMechanical 76
+183DFRManual 7
+183DFRMechanical 76
+183EPNManual 720
+183EPNMechanical 2463
+183JPNManual 3
+183JPNMechanical 20
+183JPNNone 17
+183LACNone 539
+183LPNManual 173
+183LPNMechanical 96
+183MCHManual 50
+183MCHMechanical 549
+183MCPManual 122
+183MCPMechanical 184
+183MCPNone 22
+183MHCManual 510
+183MHCMechanical 3041
+183MHCNone 93
+183MHWManual 537
+183MHWMechanical 4057
+183MHWNone 55
+183MRIManual 524
+183MRIMechanical 146
+183MRINone 85
+183NoneNone 360638
+Non is not a key in CWHR_names_d
+183PGSManual 5
+183PGSMechanical 18
+183PGSNone 16
+183PPNManual 309
+183PPNMechanical 1510
+183PPNNone 79
+183RFRManual 38
+183RFRMechanical 38
+183RFRNone 122
+183RIVNone 10
+183SGBManual 35
+183SGBMechanical 50
+183SMCManual 3673
+183SMCMechanical 7670
+183SMCNone 993
+183URBNone 55
+183WFRManual 808
+183WFRMechanical 808
+183WFRNone 95
+183WTMManual 99
+183WTMMechanical 13
+183WTMNone 78
+184AGSMechanical 29
+184BARNone 234
+184BOPManual 18
+184BOPMechanical 84
+184DFRManual 25
+184DFRMechanical 47
+184EPNManual 11
+184EPNMechanical 234
+184JPNMechanical 4
+184LACNone 41
+184LPNManual 3
+184LPNMechanical 3
+184MCHManual 37
+184MCHMechanical 288
+184MCHNone 5
+184MCPManual 583
+184MCPMechanical 773
+184MCPNone 25
+184MHCManual 556
+184MHCMechanical 3675
+184MHCNone 8
+184MHWManual 540
+184MHWMechanical 4229
+184MHWNone 2
+184MRIManual 70
+184MRIMechanical 36
+184MRINone 22
+184NoneNone 220173
+Non is not a key in CWHR_names_d
+184PGSManual 12
+184PGSMechanical 14
+184PGSNone 2
+184PPNManual 338
+184PPNMechanical 1706
+184PPNNone 1
+184RFRManual 947
+184RFRMechanical 3308
+184RFRNone 520
+184SCNManual 7
+184SGBMechanical 6
+184SMCManual 1327
+184SMCMechanical 8419
+184SMCNone 247
+184URBNone 5
+184WFRManual 583
+184WFRMechanical 5148
+184WFRNone 166
+184WTMManual 8
+184WTMMechanical 5
+185AGSManual 11
+185AGSMechanical 36
+185BARNone 1
+185CRPNone 2
+185EPNManual 180
+185EPNMechanical 1923
+185MCHMechanical 5
+185MCPManual 2
+185MCPMechanical 8
+185MCPNone 2
+185MHCMechanical 11
+185MRIMechanical 4
+185NoneNone 17118
+Non is not a key in CWHR_names_d
+185PGSMechanical 1
+185PPNMechanical 8
+185PPNNone 1
+185SGBManual 3
+185SGBMechanical 63
+185SMCManual 58
+185SMCMechanical 779
+185SMCNone 5
+185URBNone 1
+185WFRManual 2
+185WFRMechanical 40
+186AGSManual 1
+186AGSMechanical 23
+186BARNone 33
+186BOPManual 1
+186DFRManual 1
+186EPNManual 20
+186EPNMechanical 212
+186JPNMechanical 11
+186LACNone 5
+186MCHManual 1
+186MCHMechanical 8
+186MCHNone 4
+186MCPManual 9
+186MCPMechanical 39
+186MCPNone 26
+186MHCManual 46
+186MHCMechanical 259
+186MHCNone 87
+186MHWManual 75
+186MHWMechanical 516
+186MHWNone 21
+186NoneNone 65104
+Non is not a key in CWHR_names_d
+186PGSManual 1
+186PGSMechanical 47
+186PGSNone 21
+186PPNManual 55
+186PPNMechanical 285
+186PPNNone 13
+186RFRMechanical 1
+186SGBMechanical 6
+186SMCManual 133
+186SMCMechanical 1211
+186SMCNone 90
+186URBNone 1
+186WFRManual 15
+186WFRMechanical 342
+186WFRNone 1
+187AGSManual 1
+187AGSMechanical 16
+187BARNone 69
+187BOPManual 5
+187BOPMechanical 58
+187EPNManual 3
+187EPNMechanical 63
+187LACNone 2
+187LPNManual 8
+187MCHMechanical 9
+187MCPManual 449
+187MCPMechanical 210
+187MCPNone 3
+187MHCManual 45
+187MHCMechanical 253
+187MHWManual 18
+187MHWMechanical 65
+187MRIManual 81
+187MRIMechanical 12
+187NoneNone 61574
+Non is not a key in CWHR_names_d
+187PGSManual 7
+187PGSMechanical 1
+187PGSNone 7
+187PPNManual 53
+187PPNMechanical 868
+187PPNNone 1
+187RFRManual 1410
+187RFRMechanical 1655
+187SCNManual 7
+187SGBMechanical 2
+187SMCManual 762
+187SMCMechanical 3344
+187SMCNone 140
+187WFRManual 1703
+187WFRMechanical 3905
+187WFRNone 120
+187WTMManual 6
+188AGSMechanical 42
+188BARNone 124
+188BOPMechanical 11
+188DFRManual 1
+188DFRMechanical 1
+188EPNManual 2
+188EPNMechanical 343
+188JPNManual 14
+188JPNMechanical 42
+188LACNone 22
+188LPNManual 5
+188LPNMechanical 37
+188MCHManual 5
+188MCHMechanical 122
+188MCHNone 17
+188MCPManual 39
+188MCPMechanical 770
+188MCPNone 227
+188MHCManual 584
+188MHCMechanical 4159
+188MHCNone 252
+188MHWManual 145
+188MHWMechanical 1576
+188MHWNone 38
+188MRIManual 76
+188MRIMechanical 41
+188MRINone 284
+188NoneNone 445921
+Non is not a key in CWHR_names_d
+188PGSManual 18
+188PGSMechanical 103
+188PGSNone 3
+188PPNManual 186
+188PPNMechanical 1818
+188PPNNone 143
+188RFRMechanical 32
+188RFRNone 415
+188SMCManual 7162
+188SMCMechanical 33095
+188SMCNone 7041
+188URBNone 1
+188WFRManual 975
+188WFRMechanical 6756
+188WFRNone 1530
+188WTMMechanical 1
+189BARNone 2
+189BOPManual 4
+189BOPMechanical 7
+189EPNManual 1
+189EPNMechanical 1
+189MCHMechanical 1
+189MHCManual 89
+189MHCMechanical 383
+189MHCNone 2
+189MHWManual 84
+189MHWMechanical 549
+189NoneNone 17599
+Non is not a key in CWHR_names_d
+189PPNManual 41
+189PPNMechanical 271
+189SMCManual 36
+189SMCMechanical 180
+189SMCNone 2
+189URBNone 1
+189WFRManual 1
+189WFRMechanical 2
+202NoneNone 42
+Non is not a key in CWHR_names_d
+202SMCMechanical 1
+91AGSManual 18
+91AGSMechanical 112
+91ASPManual 4
+91ASPMechanical 2
+91BARNone 367
+91BOPManual 23
+91BOPMechanical 45
+91CPCMechanical 16
+91CRPNone 17
+91EPNManual 86
+91EPNMechanical 633
+91JPNMechanical 19
+91LACNone 15
+91LPNManual 1
+91LPNMechanical 11
+91LSGMechanical 7
+91MCHManual 5
+91MCHMechanical 100
+91MCPManual 12
+91MCPMechanical 96
+91MHCManual 30
+91MHCMechanical 325
+91MHCNone 10
+91MHWManual 25
+91MHWMechanical 249
+91MHWNone 1
+91MRIManual 48
+91MRIMechanical 63
+91MRINone 27
+91NoneNone 110752
+Non is not a key in CWHR_names_d
+91PGSMechanical 5
+91PPNManual 12
+91PPNMechanical 192
+91PPNNone 45
+91RFRManual 1
+91RFRMechanical 42
+91SGBManual 14
+91SGBMechanical 101
+91SMCManual 476
+91SMCMechanical 1645
+91SMCNone 229
+91URBNone 139
+91WFRManual 74
+91WFRMechanical 436
+91WFRNone 1
+91WTMManual 11
+91WTMMechanical 8
+93AGSMechanical 45
+93CRPNone 66
+93MRIMechanical 1
+93NoneNone 64220
+Non is not a key in CWHR_names_d
+93SGBMechanical 7
+98AGSManual 27
+98AGSMechanical 5
+98BARNone 345
+98BOPManual 19
+98CRPNone 8
+98DFRManual 3
+98EPNManual 423
+98EPNMechanical 15
+98LACNone 10108
+98LPNMechanical 1
+98LSGManual 1
+98MCHManual 16
+98MCHNone 1
+98MCPManual 2
+98MCPNone 6
+98MHCManual 133
+98MHCMechanical 8
+98MHCNone 38
+98MHWManual 135
+98MHWMechanical 5
+98MHWNone 14
+98MRIManual 42
+98MRIMechanical 3
+98MRINone 9
+98NoneNone 283880
+Non is not a key in CWHR_names_d
+98PGSNone 1
+98PPNManual 32
+98PPNMechanical 4
+98PPNNone 11
+98RIVNone 92
+98SGBManual 97
+98SGBMechanical 6
+98SMCManual 645
+98SMCMechanical 58
+98SMCNone 76
+98URBNone 21
+98WFRManual 107
+98WFRMechanical 79
+98WTMMechanical 8
+98WTMNone 3
+99AGSManual 7
+99AGSMechanical 33
+99ASPManual 1
+99ASPMechanical 1
+99BARNone 560
+99EPNMechanical 2
+99LACNone 53
+99MCHMechanical 3
+99MCPManual 15
+99MCPMechanical 19
+99MHCManual 13
+99MHCMechanical 4
+99MHWManual 6
+99MRIMechanical 1
+99MRINone 2
+99NoneNone 10911560
+Non is not a key in CWHR_names_d
+99PGSManual 1
+99PGSMechanical 87
+99PGSNone 18
+99PPNManual 2
+99PPNMechanical 18
+99RFRManual 2
+99RFRMechanical 3
+99SGBManual 4
+99SGBMechanical 6
+99SMCManual 22
+99SMCMechanical 59
+99SMCNone 3
+99WFRManual 3
+99WFRMechanical 13
+finished
+#+end_example
+
+* new block- result matches in LUT
+        #print(combination  )
+        code = FM + CWHR + TX
+
+        if (not code in lut_d):
+            print(unique_numeric_combination + "(" + FM + "," + CWHR + "," + TX + ") not in LUT; ignoring", file=open(output_notes, 'a'))
+            writer.writerow([unique_numeric_combination, FM, CWHR, TX, count, 0])
+        else:
+            print("translating " + unique_numeric_combination + "(" + FM + "," + CWHR + "," + TX + ") from fuel model " + str(FM) + " to " + str(lut_d[code]), file=open(output_notes, 'a'))
+            writer.writerow([unique_numeric_combination, FM, CWHR, TX, count, 1])
+
+        #writer.writerow([unique_numeric_combination, FM, CWHR, TX, count, TRANSLATED])
+
+* Process the Lookup Table
+TODO: make this format sync with the output LUT format.
+This will ignore the CWHR_name column.
+LUT must be of the form PRE-TX_FM,CWHR_TYPE,CWHR_NAME,TX,POST-TX_FM and include a header row.
+Create a dictionary with pairs like this: "103MHCManual Treatments":"101".
+
+#+begin_src python :results output :session shared
+import csv
+
+lut_d = {}
+with open(LUT_f, mode='r') as lut:
+    next(lut, None) # skip header
+    for line in csv.reader(lut):
+        #lut_d[''.join([line[0],line[1],line[2]])] = line[3]
+        lut_d[''.join([line[0],line[1],line[3]])] = line[4]
+
+print(lut_d, file=open(output_notes, 'a'))
+print(lut_d)
+
+#+end_src
+
+#+RESULTS:
+: {'91AGSManual': '91', '93AGSManual': '93', '98AGSManual': '98', '99AGSManual': '99', '101AGSManual': '101', '102AGSManual': '102', '103AGSManual': '103', '121AGSManual': '121', '122AGSManual': '121', '123AGSManual': '121', '141AGSManual': '141', '142AGSManual': '141', '143AGSManual': '141', '144AGSManual': '141', '145AGSManual': '142', '147AGSManual': '142', '161AGSManual': '161', '162AGSManual': '161', '163AGSManual': '161', '165AGSManual': '162', '181AGSManual': '181', '182AGSManual': '181', '183AGSManual': '181', '184AGSManual': '181', '185AGSManual': '182', '186AGSManual': '182', '187AGSManual': '182', '188AGSManual': '182', '189AGSManual': '182', '202AGSManual': '182', '91AGSMastication': '91', '98AGSMastication': '98', '99AGSMastication': '99', '101AGSMastication': '101', '102AGSMastication': '102', '103AGSMastication': '103', '121AGSMastication': '121', '122AGSMastication': '121', '141AGSMastication': '141', '142AGSMastication': '141', '144AGSMastication': '141', '145AGSMastication': '141', '161AGSMastication': '161', '162AGSMastication': '161', '165AGSMastication': '161', '181AGSMastication': '182', '182AGSMastication': '182', '183AGSMastication': '182', '184AGSMastication': '182', '185AGSMastication': '182', '186AGSMastication': '182', '187AGSMastication': '182', '188AGSMastication': '182', '91AGSMechanical': '91', '93AGSMechanical': '93', '98AGSMechanical': '98', '99AGSMechanical': '99', '101AGSMechanical': '101', '102AGSMechanical': '102', '103AGSMechanical': '103', '121AGSMechanical': '121', '122AGSMechanical': '121', '141AGSMechanical': '141', '142AGSMechanical': '141', '144AGSMechanical': '142', '145AGSMechanical': '142', '161AGSMechanical': '161', '162AGSMechanical': '161', '165AGSMechanical': '162', '181AGSMechanical': '181', '182AGSMechanical': '181', '183AGSMechanical': '181', '184AGSMechanical': '181', '185AGSMechanical': '184', '186AGSMechanical': '184', '187AGSMechanical': '184', '188AGSMechanical': '184', '145ASPManual': '142', '165ASPManual': '162', '91ASPMastication': '91', '99ASPMastication': '99', '102ASPMastication': '102', '103ASPMastication': '103', '122ASPMastication': '121', '142ASPMastication': '141', '165ASPMastication': '161', '181ASPMastication': '182', '183ASPMastication': '182', '142ASPMechanical': '141', '161ASPMechanical': '161', '165ASPMechanical': '162', '181ASPMechanical': '181', '182ASPMechanical': '181', '183ASPMechanical': '181', '91BARManual': '91', '98BARManual': '98', '99BARManual': '99', '101BARManual': '101', '102BARManual': '102', '103BARManual': '103', '121BARManual': '121', '122BARManual': '121', '141BARManual': '141', '142BARManual': '141', '143BARManual': '141', '144BARManual': '141', '145BARManual': '142', '147BARManual': '142', '161BARManual': '161', '162BARManual': '161', '163BARManual': '161', '165BARManual': '162', '181BARManual': '181', '182BARManual': '181', '183BARManual': '181', '184BARManual': '181', '185BARManual': '182', '186BARManual': '182', '187BARManual': '182', '188BARManual': '182', '189BARManual': '182', '98BARMastication': '98', '102BARMastication': '102', '103BARMastication': '103', '121BARMastication': '121', '122BARMastication': '122', '144BARMastication': '144', '145BARMastication': '145', '163BARMastication': '163', '165BARMastication': '165', '181BARMastication': '181', '183BARMastication': '183', '91BOPMechanical': '91', '98BOPMechanical': '98', '101BOPMechanical': '101', '102BOPMechanical': '102', '103BOPMechanical': '103', '121BOPMechanical': '121', '122BOPMechanical': '121', '141BOPMechanical': '141', '142BOPMechanical': '141', '144BOPMechanical': '142', '145BOPMechanical': '142', '162BOPMechanical': '161', '163BOPMechanical': '161', '165BOPMechanical': '162', '181BOPMechanical': '181', '182BOPMechanical': '181', '183BOPMechanical': '181', '184BOPMechanical': '181', '186BOPMechanical': '184', '187BOPMechanical': '184', '188BOPMechanical': '184', '189BOPMechanical': '181', '91CPCManual': '91', '91CPCMechanical': '91', '144CPCMechanical': '142', '162CPCMechanical': '161', '181CPCMechanical': '181', '182CPCMechanical': '181', '91CRPManual': '91', '93CRPManual': '93', '98CRPManual': '98', '101CRPManual': '101', '102CRPManual': '102', '103CRPManual': '103', '121CRPManual': '121', '122CRPManual': '122', '141CRPManual': '141', '142CRPManual': '142', '144CRPManual': '144', '161CRPManual': '161', '182CRPManual': '182', '185CRPManual': '185', '98DFRMechanical': '98', '101DFRMechanical': '101', '102DFRMechanical': '102', '103DFRMechanical': '103', '121DFRMechanical': '121', '142DFRMechanical': '141', '144DFRMechanical': '142', '162DFRMechanical': '161', '181DFRMechanical': '181', '182DFRMechanical': '181', '183DFRMechanical': '181', '184DFRMechanical': '181', '186DFRMechanical': '184', '188DFRMechanical': '184', '91EPNManual': '91', '98EPNManual': '98', '101EPNManual': '101', '102EPNManual': '102', '121EPNManual': '121', '122EPNManual': '121', '142EPNManual': '141', '144EPNManual': '141', '145EPNManual': '142', '162EPNManual': '161', '165EPNManual': '162', '181EPNManual': '181', '182EPNManual': '181', '183EPNManual': '181', '184EPNManual': '182', '185EPNManual': '182', '186EPNManual': '182', '188EPNManual': '182', '91EPNMechanical': '91', '98EPNMechanical': '98', '99EPNMechanical': '99', '101EPNMechanical': '101', '102EPNMechanical': '102', '103EPNMechanical': '103', '121EPNMechanical': '121', '122EPNMechanical': '121', '141EPNMechanical': '141', '142EPNMechanical': '141', '144EPNMechanical': '142', '145EPNMechanical': '142', '147EPNMechanical': '142', '161EPNMechanical': '161', '162EPNMechanical': '161', '165EPNMechanical': '162', '181EPNMechanical': '181', '182EPNMechanical': '181', '183EPNMechanical': '181', '184EPNMechanical': '181', '185EPNMechanical': '184', '186EPNMechanical': '184', '187EPNMechanical': '184', '188EPNMechanical': '184', '189EPNMechanical': '181', '103JPNManual': '103', '121JPNManual': '121', '122JPNManual': '121', '144JPNManual': '141', '145JPNManual': '142', '162JPNManual': '161', '165JPNManual': '162', '181JPNManual': '181', '183JPNManual': '181', '91JPNMechanical': '91', '102JPNMechanical': '102', '103JPNMechanical': '103', '121JPNMechanical': '121', '122JPNMechanical': '121', '141JPNMechanical': '141', '142JPNMechanical': '141', '144JPNMechanical': '142', '145JPNMechanical': '142', '161JPNMechanical': '161', '162JPNMechanical': '161', '165JPNMechanical': '162', '181JPNMechanical': '181', '182JPNMechanical': '181', '183JPNMechanical': '181', '184JPNMechanical': '181', '186JPNMechanical': '184', '188JPNMechanical': '184', '165JPNPrescribed Fire': '162', '91LACManual': '91', '98LACManual': '98', '99LACManual': '99', '101LACManual': '101', '102LACManual': '102', '103LACManual': '103', '121LACManual': '121', '122LACManual': '121', '141LACManual': '141', '142LACManual': '142', '144LACManual': '144', '145LACManual': '145', '161LACManual': '161', '162LACManual': '162', '163LACManual': '163', '165LACManual': '165', '181LACManual': '181', '182LACManual': '182', '183LACManual': '183', '184LACManual': '184', '186LACManual': '186', '187LACManual': '187', '188LACManual': '188', '98LACMastication': '98', '102LACMastication': '102', '121LACMastication': '121', '122LACMastication': '122', '165LACMastication': '165', '181LACMastication': '181', '98LPNManual': '98', '141LPNManual': '141', '162LPNManual': '161', '165LPNManual': '162', '183LPNManual': '182', '187LPNManual': '182', '188LPNManual': '182', '91LPNMechanical': '91', '98LPNMechanical': '98', '102LPNMechanical': '102', '121LPNMechanical': '121', '122LPNMechanical': '121', '141LPNMechanical': '141', '142LPNMechanical': '141', '144LPNMechanical': '142', '162LPNMechanical': '161', '165LPNMechanical': '162', '181LPNMechanical': '181', '183LPNMechanical': '181', '184LPNMechanical': '181', '187LPNMechanical': '184', '188LPNMechanical': '184', '122LPNPrescribed Fire': '121', '144LPNPrescribed Fire': '142', '165LPNPrescribed Fire': '162', '182LPNPrescribed Fire': '181', '183LPNPrescribed Fire': '181', '184LPNPrescribed Fire': '181', '187LPNPrescribed Fire': '184', '188LPNPrescribed Fire': '184', '102LSGManual': '102', '121LSGManual': '121', '91LSGMechanical': '91', '98LSGMechanical': '98', '101LSGMechanical': '101', '102LSGMechanical': '102', '121LSGMechanical': '121', '122LSGMechanical': '121', '144LSGMechanical': '142', '161LSGMechanical': '161', '98MCHManual': '98', '102MCHManual': '102', '103MCHManual': '103', '121MCHManual': '121', '122MCHManual': '121', '141MCHManual': '141', '142MCHManual': '141', '144MCHManual': '141', '145MCHManual': '142', '161MCHManual': '161', '162MCHManual': '161', '165MCHManual': '162', '181MCHManual': '181', '182MCHManual': '181', '183MCHManual': '181', '184MCHManual': '181', '186MCHManual': '182', '188MCHManual': '182', '91MCHMastication': '91', '98MCHMastication': '98', '101MCHMastication': '101', '102MCHMastication': '102', '103MCHMastication': '103', '121MCHMastication': '121', '122MCHMastication': '121', '141MCHMastication': '141', '142MCHMastication': '141', '144MCHMastication': '141', '145MCHMastication': '141', '162MCHMastication': '161', '165MCHMastication': '161', '181MCHMastication': '182', '183MCHMastication': '182', '184MCHMastication': '182', '185MCHMastication': '182', '186MCHMastication': '182', '187MCHMastication': '182', '188MCHMastication': '182', '91MCHMechanical': '91', '98MCHMechanical': '98', '99MCHMechanical': '99', '101MCHMechanical': '101', '102MCHMechanical': '102', '103MCHMechanical': '103', '121MCHMechanical': '121', '122MCHMechanical': '121', '141MCHMechanical': '141', '142MCHMechanical': '141', '144MCHMechanical': '142', '145MCHMechanical': '142', '161MCHMechanical': '161', '162MCHMechanical': '161', '163MCHMechanical': '161', '165MCHMechanical': '162', '181MCHMechanical': '181', '182MCHMechanical': '181', '183MCHMechanical': '181', '184MCHMechanical': '181', '186MCHMechanical': '184', '188MCHMechanical': '184', '189MCHMechanical': '181', '91MCPManual': '91', '98MCPManual': '98', '101MCPManual': '101', '102MCPManual': '102', '103MCPManual': '103', '121MCPManual': '121', '122MCPManual': '121', '141MCPManual': '141', '142MCPManual': '141', '144MCPManual': '141', '145MCPManual': '142', '161MCPManual': '161', '162MCPManual': '161', '165MCPManual': '162', '181MCPManual': '181', '182MCPManual': '181', '183MCPManual': '181', '184MCPManual': '181', '185MCPManual': '182', '186MCPManual': '182', '187MCPManual': '182', '188MCPManual': '182', '91MCPMastication': '91', '99MCPMastication': '99', '101MCPMastication': '101', '102MCPMastication': '102', '103MCPMastication': '103', '121MCPMastication': '121', '122MCPMastication': '121', '141MCPMastication': '141', '142MCPMastication': '141', '144MCPMastication': '141', '145MCPMastication': '141', '147MCPMastication': '141', '161MCPMastication': '161', '162MCPMastication': '161', '165MCPMastication': '161', '181MCPMastication': '182', '182MCPMastication': '182', '183MCPMastication': '182', '184MCPMastication': '182', '185MCPMastication': '182', '186MCPMastication': '182', '187MCPMastication': '182', '188MCPMastication': '182', '91MCPMechanical': '91', '98MCPMechanical': '98', '99MCPMechanical': '99', '101MCPMechanical': '101', '102MCPMechanical': '102', '103MCPMechanical': '103', '121MCPMechanical': '121', '122MCPMechanical': '121', '141MCPMechanical': '141', '142MCPMechanical': '141', '143MCPMechanical': '141', '144MCPMechanical': '142', '145MCPMechanical': '142', '161MCPMechanical': '161', '162MCPMechanical': '161', '165MCPMechanical': '162', '181MCPMechanical': '181', '182MCPMechanical': '181', '183MCPMechanical': '181', '184MCPMechanical': '181', '186MCPMechanical': '184', '187MCPMechanical': '184', '188MCPMechanical': '184', '98MCPPrescribed Fire': '98', '99MCPPrescribed Fire': '99', '101MCPPrescribed Fire': '101', '102MCPPrescribed Fire': '101', '121MCPPrescribed Fire': '121', '122MCPPrescribed Fire': '121', '141MCPPrescribed Fire': '141', '142MCPPrescribed Fire': '141', '144MCPPrescribed Fire': '142', '161MCPPrescribed Fire': '161', '162MCPPrescribed Fire': '161', '165MCPPrescribed Fire': '162', '181MCPPrescribed Fire': '181', '182MCPPrescribed Fire': '181', '183MCPPrescribed Fire': '181', '184MCPPrescribed Fire': '181', '186MCPPrescribed Fire': '184', '187MCPPrescribed Fire': '184', '188MCPPrescribed Fire': '184', '91MHCManual': '91', '98MHCManual': '98', '102MHCManual': '102', '103MHCManual': '103', '121MHCManual': '121', '122MHCManual': '121', '141MHCManual': '141', '142MHCManual': '141', '144MHCManual': '141', '145MHCManual': '142', '161MHCManual': '161', '162MHCManual': '161', '165MHCManual': '162', '181MHCManual': '181', '182MHCManual': '181', '183MHCManual': '181', '184MHCManual': '181', '186MHCManual': '182', '187MHCManual': '182', '188MHCManual': '182', '189MHCManual': '182', '91MHCMastication': '91', '102MHCMastication': '102', '122MHCMastication': '121', '142MHCMastication': '141', '144MHCMastication': '141', '145MHCMastication': '141', '162MHCMastication': '161', '165MHCMastication': '161', '183MHCMastication': '182', '184MHCMastication': '182', '186MHCMastication': '182', '187MHCMastication': '182', '188MHCMastication': '182', '189MHCMastication': '182', '91MHCMechanical': '91', '98MHCMechanical': '98', '99MHCMechanical': '99', '101MHCMechanical': '101', '102MHCMechanical': '102', '103MHCMechanical': '103', '121MHCMechanical': '121', '122MHCMechanical': '121', '141MHCMechanical': '141', '142MHCMechanical': '141', '144MHCMechanical': '142', '145MHCMechanical': '142', '161MHCMechanical': '161', '162MHCMechanical': '161', '163MHCMechanical': '161', '165MHCMechanical': '162', '181MHCMechanical': '181', '182MHCMechanical': '181', '183MHCMechanical': '181', '184MHCMechanical': '181', '185MHCMechanical': '184', '186MHCMechanical': '184', '187MHCMechanical': '184', '188MHCMechanical': '184', '189MHCMechanical': '181', '91MHCPrescribed Fire': '91', '98MHCPrescribed Fire': '98', '101MHCPrescribed Fire': '101', '102MHCPrescribed Fire': '101', '103MHCPrescribed Fire': '101', '121MHCPrescribed Fire': '121', '141MHCPrescribed Fire': '141', '142MHCPrescribed Fire': '141', '144MHCPrescribed Fire': '142', '145MHCPrescribed Fire': '142', '161MHCPrescribed Fire': '161', '162MHCPrescribed Fire': '161', '165MHCPrescribed Fire': '162', '181MHCPrescribed Fire': '181', '183MHCPrescribed Fire': '181', '184MHCPrescribed Fire': '181', '188MHCPrescribed Fire': '184', '91MHWManual': '91', '98MHWManual': '98', '101MHWManual': '101', '102MHWManual': '102', '103MHWManual': '103', '122MHWManual': '121', '141MHWManual': '141', '142MHWManual': '141', '144MHWManual': '141', '145MHWManual': '142', '161MHWManual': '161', '162MHWManual': '161', '165MHWManual': '162', '181MHWManual': '181', '182MHWManual': '181', '183MHWManual': '181', '184MHWManual': '181', '186MHWManual': '182', '187MHWManual': '182', '188MHWManual': '182', '189MHWManual': '182', '91MHWMastication': '91', '98MHWMastication': '98', '99MHWMastication': '99', '101MHWMastication': '101', '102MHWMastication': '102', '103MHWMastication': '103', '121MHWMastication': '121', '122MHWMastication': '121', '141MHWMastication': '141', '142MHWMastication': '141', '144MHWMastication': '141', '145MHWMastication': '141', '163MHWMastication': '161', '165MHWMastication': '161', '181MHWMastication': '182', '182MHWMastication': '182', '183MHWMastication': '182', '184MHWMastication': '182', '186MHWMastication': '182', '187MHWMastication': '182', '188MHWMastication': '182', '189MHWMastication': '182', '91MHWMechanical': '91', '98MHWMechanical': '98', '99MHWMechanical': '99', '101MHWMechanical': '101', '102MHWMechanical': '102', '103MHWMechanical': '103', '121MHWMechanical': '121', '122MHWMechanical': '121', '141MHWMechanical': '141', '142MHWMechanical': '141', '144MHWMechanical': '142', '145MHWMechanical': '142', '161MHWMechanical': '161', '162MHWMechanical': '161', '163MHWMechanical': '161', '165MHWMechanical': '162', '181MHWMechanical': '181', '182MHWMechanical': '181', '183MHWMechanical': '181', '184MHWMechanical': '181', '186MHWMechanical': '184', '187MHWMechanical': '184', '188MHWMechanical': '184', '189MHWMechanical': '181', '165MHWPrescribed Fire': '162', '91MRIManual': '91', '98MRIManual': '98', '99MRIManual': '99', '102MRIManual': '102', '103MRIManual': '103', '121MRIManual': '121', '122MRIManual': '121', '141MRIManual': '141', '142MRIManual': '141', '145MRIManual': '142', '161MRIManual': '161', '162MRIManual': '161', '165MRIManual': '162', '181MRIManual': '181', '182MRIManual': '181', '183MRIManual': '181', '184MRIManual': '181', '187MRIManual': '182', '188MRIManual': '182', '91MRIMastication': '91', '99MRIMastication': '99', '101MRIMastication': '101', '102MRIMastication': '102', '103MRIMastication': '103', '121MRIMastication': '121', '122MRIMastication': '122', '141MRIMastication': '141', '142MRIMastication': '142', '144MRIMastication': '144', '145MRIMastication': '145', '161MRIMastication': '161', '162MRIMastication': '162', '165MRIMastication': '165', '181MRIMastication': '181', '182MRIMastication': '182', '183MRIMastication': '183', '184MRIMastication': '184', '187MRIMastication': '187', '188MRIMastication': '188', '91MRIMechanical': '91', '93MRIMechanical': '93', '98MRIMechanical': '98', '101MRIMechanical': '101', '102MRIMechanical': '102', '121MRIMechanical': '121', '122MRIMechanical': '122', '142MRIMechanical': '142', '144MRIMechanical': '144', '145MRIMechanical': '145', '161MRIMechanical': '161', '162MRIMechanical': '162', '165MRIMechanical': '165', '181MRIMechanical': '181', '182MRIMechanical': '182', '183MRIMechanical': '183', '184MRIMechanical': '184', '185MRIMechanical': '185', '187MRIMechanical': '187', '188MRIMechanical': '188', '98MRIPrescribed Fire': '98', '101MRIPrescribed Fire': '101', '102MRIPrescribed Fire': '101', '121MRIPrescribed Fire': '121', '122MRIPrescribed Fire': '121', '142MRIPrescribed Fire': '141', '144MRIPrescribed Fire': '142', '161MRIPrescribed Fire': '161', '165MRIPrescribed Fire': '162', '181MRIPrescribed Fire': '181', '182MRIPrescribed Fire': '181', '183MRIPrescribed Fire': '181', '184MRIPrescribed Fire': '181', '187MRIPrescribed Fire': '184', '188MRIPrescribed Fire': '184', '91PGSManual': '91', '98PGSManual': '98', '99PGSManual': '99', '101PGSManual': '101', '102PGSManual': '102', '103PGSManual': '103', '121PGSManual': '121', '122PGSManual': '121', '141PGSManual': '141', '142PGSManual': '141', '144PGSManual': '141', '145PGSManual': '142', '161PGSManual': '161', '162PGSManual': '161', '165PGSManual': '162', '181PGSManual': '181', '182PGSManual': '181', '183PGSManual': '181', '184PGSManual': '181', '186PGSManual': '182', '187PGSManual': '182', '188PGSManual': '182', '91PGSMastication': '91', '99PGSMastication': '99', '101PGSMastication': '101', '102PGSMastication': '102', '103PGSMastication': '103', '121PGSMastication': '121', '122PGSMastication': '121', '142PGSMastication': '141', '144PGSMastication': '141', '145PGSMastication': '141', '162PGSMastication': '161', '165PGSMastication': '161', '181PGSMastication': '182', '182PGSMastication': '182', '183PGSMastication': '182', '184PGSMastication': '182', '186PGSMastication': '182', '188PGSMastication': '182', '101PGSMechanical': '101', '102PGSMechanical': '102', '103PGSMechanical': '103', '121PGSMechanical': '121', '122PGSMechanical': '121', '141PGSMechanical': '141', '142PGSMechanical': '141', '144PGSMechanical': '142', '145PGSMechanical': '142', '161PGSMechanical': '161', '162PGSMechanical': '161', '165PGSMechanical': '162', '181PGSMechanical': '181', '183PGSMechanical': '181', '184PGSMechanical': '181', '185PGSMechanical': '184', '186PGSMechanical': '184', '187PGSMechanical': '184', '188PGSMechanical': '184', '99PGSPrescribed Fire': '99', '101PGSPrescribed Fire': '101', '121PGSPrescribed Fire': '121', '122PGSPrescribed Fire': '121', '144PGSPrescribed Fire': '142', '161PGSPrescribed Fire': '161', '165PGSPrescribed Fire': '162', '181PGSPrescribed Fire': '181', '182PGSPrescribed Fire': '181', '184PGSPrescribed Fire': '181', '187PGSPrescribed Fire': '184', '91PPNManual': '91', '98PPNManual': '98', '101PPNManual': '101', '102PPNManual': '102', '103PPNManual': '103', '121PPNManual': '121', '122PPNManual': '121', '141PPNManual': '141', '142PPNManual': '141', '144PPNManual': '141', '145PPNManual': '142', '161PPNManual': '161', '162PPNManual': '161', '165PPNManual': '162', '181PPNManual': '181', '182PPNManual': '181', '183PPNManual': '181', '184PPNManual': '181', '185PPNManual': '182', '186PPNManual': '182', '187PPNManual': '182', '188PPNManual': '182', '189PPNManual': '182', '91PPNMastication': '91', '102PPNMastication': '102', '122PPNMastication': '121', '142PPNMastication': '141', '144PPNMastication': '141', '145PPNMastication': '141', '162PPNMastication': '161', '163PPNMastication': '161', '165PPNMastication': '161', '181PPNMastication': '182', '183PPNMastication': '182', '184PPNMastication': '182', '185PPNMastication': '182', '186PPNMastication': '182', '187PPNMastication': '182', '188PPNMastication': '182', '189PPNMastication': '182', '91PPNMechanical': '91', '98PPNMechanical': '98', '99PPNMechanical': '99', '101PPNMechanical': '101', '102PPNMechanical': '102', '103PPNMechanical': '103', '121PPNMechanical': '121', '122PPNMechanical': '121', '141PPNMechanical': '141', '142PPNMechanical': '141', '144PPNMechanical': '142', '145PPNMechanical': '142', '161PPNMechanical': '161', '162PPNMechanical': '161', '163PPNMechanical': '161', '165PPNMechanical': '162', '181PPNMechanical': '181', '182PPNMechanical': '181', '183PPNMechanical': '181', '184PPNMechanical': '181', '185PPNMechanical': '184', '186PPNMechanical': '184', '187PPNMechanical': '184', '188PPNMechanical': '184', '189PPNMechanical': '181', '142PPNPrescribed Fire': '141', '161PPNPrescribed Fire': '161', '162PPNPrescribed Fire': '161', '165PPNPrescribed Fire': '162', '183PPNPrescribed Fire': '181', '188PPNPrescribed Fire': '184', '91RFRManual': '91', '99RFRManual': '99', '101RFRManual': '101', '102RFRManual': '102', '121RFRManual': '121', '122RFRManual': '121', '141RFRManual': '141', '142RFRManual': '141', '144RFRManual': '141', '161RFRManual': '161', '165RFRManual': '162', '181RFRManual': '181', '182RFRManual': '181', '183RFRManual': '181', '184RFRManual': '181', '187RFRManual': '182', '188RFRManual': '182', '122RFRMastication': '121', '144RFRMastication': '141', '181RFRMastication': '182', '184RFRMastication': '182', '91RFRMechanical': '91', '99RFRMechanical': '99', '101RFRMechanical': '101', '102RFRMechanical': '102', '121RFRMechanical': '121', '122RFRMechanical': '121', '141RFRMechanical': '141', '142RFRMechanical': '141', '144RFRMechanical': '142', '161RFRMechanical': '161', '162RFRMechanical': '161', '165RFRMechanical': '162', '181RFRMechanical': '181', '182RFRMechanical': '181', '183RFRMechanical': '181', '184RFRMechanical': '181', '186RFRMechanical': '184', '187RFRMechanical': '184', '188RFRMechanical': '184', '99RFRPrescribed Fire': '99', '101RFRPrescribed Fire': '101', '121RFRPrescribed Fire': '121', '122RFRPrescribed Fire': '121', '141RFRPrescribed Fire': '141', '144RFRPrescribed Fire': '142', '161RFRPrescribed Fire': '161', '165RFRPrescribed Fire': '162', '181RFRPrescribed Fire': '181', '182RFRPrescribed Fire': '181', '183RFRPrescribed Fire': '181', '184RFRPrescribed Fire': '181', '187RFRPrescribed Fire': '184', '98RIVManual': '98', '122RIVManual': '121', '145RIVManual': '142', '165RIVManual': '162', '181RIVManual': '181', '183RIVManual': '181', '122SCNManual': '121', '161SCNManual': '161', '184SCNManual': '182', '187SCNManual': '182', '122SCNPrescribed Fire': '121', '144SCNPrescribed Fire': '142', '161SCNPrescribed Fire': '161', '184SCNPrescribed Fire': '181', '187SCNPrescribed Fire': '184', '91SGBManual': '91', '101SGBManual': '101', '102SGBManual': '102', '121SGBManual': '121', '122SGBManual': '121', '144SGBManual': '141', '165SGBManual': '162', '181SGBManual': '181', '91SGBMastication': '91', '98SGBMastication': '98', '99SGBMastication': '99', '102SGBMastication': '102', '103SGBMastication': '103', '121SGBMastication': '121', '122SGBMastication': '121', '142SGBMastication': '141', '144SGBMastication': '141', '145SGBMastication': '141', '161SGBMastication': '161', '162SGBMastication': '161', '165SGBMastication': '161', '181SGBMastication': '182', '182SGBMastication': '182', '183SGBMastication': '182', '184SGBMastication': '182', '185SGBMastication': '182', '186SGBMastication': '182', '187SGBMastication': '182', '91SGBMechanical': '91', '93SGBMechanical': '93', '98SGBMechanical': '98', '101SGBMechanical': '101', '102SGBMechanical': '102', '103SGBMechanical': '103', '121SGBMechanical': '121', '122SGBMechanical': '121', '141SGBMechanical': '141', '142SGBMechanical': '141', '144SGBMechanical': '142', '145SGBMechanical': '142', '147SGBMechanical': '142', '161SGBMechanical': '161', '162SGBMechanical': '161', '165SGBMechanical': '162', '181SGBMechanical': '181', '182SGBMechanical': '181', '183SGBMechanical': '181', '184SGBMechanical': '181', '185SGBMechanical': '184', '186SGBMechanical': '184', '91SMCManual': '91', '98SMCManual': '98', '99SMCManual': '99', '101SMCManual': '101', '102SMCManual': '102', '103SMCManual': '103', '121SMCManual': '121', '122SMCManual': '121', '141SMCManual': '141', '142SMCManual': '141', '144SMCManual': '141', '145SMCManual': '142', '161SMCManual': '161', '162SMCManual': '161', '165SMCManual': '162', '181SMCManual': '181', '182SMCManual': '181', '183SMCManual': '181', '184SMCManual': '181', '185SMCManual': '182', '186SMCManual': '182', '187SMCManual': '182', '188SMCManual': '182', '189SMCManual': '182', '91SMCMastication': '91', '98SMCMastication': '98', '102SMCMastication': '102', '121SMCMastication': '121', '122SMCMastication': '121', '142SMCMastication': '141', '144SMCMastication': '141', '145SMCMastication': '141', '161SMCMastication': '161', '162SMCMastication': '161', '165SMCMastication': '161', '181SMCMastication': '182', '182SMCMastication': '182', '183SMCMastication': '182', '184SMCMastication': '182', '185SMCMastication': '182', '186SMCMastication': '182', '187SMCMastication': '182', '188SMCMastication': '182', '189SMCMastication': '182', '91SMCMechanical': '91', '98SMCMechanical': '98', '99SMCMechanical': '99', '101SMCMechanical': '101', '102SMCMechanical': '102', '103SMCMechanical': '103', '121SMCMechanical': '121', '122SMCMechanical': '121', '141SMCMechanical': '141', '142SMCMechanical': '141', '144SMCMechanical': '142', '145SMCMechanical': '142', '161SMCMechanical': '161', '162SMCMechanical': '161', '165SMCMechanical': '162', '181SMCMechanical': '181', '182SMCMechanical': '181', '183SMCMechanical': '181', '184SMCMechanical': '181', '185SMCMechanical': '184', '186SMCMechanical': '184', '187SMCMechanical': '184', '188SMCMechanical': '184', '189SMCMechanical': '181', '202SMCMechanical': '181', '91SMCPrescribed Fire': '91', '98SMCPrescribed Fire': '98', '101SMCPrescribed Fire': '101', '102SMCPrescribed Fire': '101', '103SMCPrescribed Fire': '101', '121SMCPrescribed Fire': '121', '122SMCPrescribed Fire': '121', '141SMCPrescribed Fire': '141', '142SMCPrescribed Fire': '141', '144SMCPrescribed Fire': '142', '145SMCPrescribed Fire': '142', '161SMCPrescribed Fire': '161', '162SMCPrescribed Fire': '161', '165SMCPrescribed Fire': '162', '181SMCPrescribed Fire': '181', '182SMCPrescribed Fire': '181', '183SMCPrescribed Fire': '181', '184SMCPrescribed Fire': '181', '186SMCPrescribed Fire': '184', '187SMCPrescribed Fire': '184', '188SMCPrescribed Fire': '184', '189SMCPrescribed Fire': '181', '91URBManual': '91', '98URBManual': '98', '102URBManual': '102', '121URBManual': '121', '122URBManual': '121', '142URBManual': '141', '144URBManual': '141', '145URBManual': '142', '162URBManual': '161', '165URBManual': '162', '181URBManual': '181', '182URBManual': '181', '183URBManual': '181', '184URBManual': '181', '185URBManual': '182', '186URBManual': '182', '188URBManual': '182', '189URBManual': '182', '91WFRManual': '91', '98WFRManual': '98', '99WFRManual': '99', '101WFRManual': '101', '102WFRManual': '102', '121WFRManual': '121', '122WFRManual': '121', '141WFRManual': '141', '142WFRManual': '141', '144WFRManual': '141', '145WFRManual': '142', '161WFRManual': '161', '162WFRManual': '161', '165WFRManual': '162', '181WFRManual': '181', '182WFRManual': '181', '183WFRManual': '181', '184WFRManual': '181', '185WFRManual': '182', '186WFRManual': '182', '187WFRManual': '182', '188WFRManual': '182', '189WFRManual': '182', '102WFRMastication': '102', '122WFRMastication': '121', '142WFRMastication': '141', '144WFRMastication': '141', '161WFRMastication': '161', '165WFRMastication': '161', '181WFRMastication': '182', '182WFRMastication': '182', '183WFRMastication': '182', '184WFRMastication': '182', '186WFRMastication': '182', '187WFRMastication': '182', '91WFRMechanical': '91', '98WFRMechanical': '98', '99WFRMechanical': '99', '101WFRMechanical': '101', '102WFRMechanical': '102', '103WFRMechanical': '103', '121WFRMechanical': '121', '122WFRMechanical': '121', '141WFRMechanical': '141', '142WFRMechanical': '141', '143WFRMechanical': '141', '144WFRMechanical': '142', '145WFRMechanical': '142', '147WFRMechanical': '142', '161WFRMechanical': '161', '162WFRMechanical': '161', '165WFRMechanical': '162', '181WFRMechanical': '181', '182WFRMechanical': '181', '183WFRMechanical': '181', '184WFRMechanical': '181', '185WFRMechanical': '184', '186WFRMechanical': '184', '187WFRMechanical': '184', '188WFRMechanical': '184', '189WFRMechanical': '181', '102WFRPrescribed Fire': '101', '122WFRPrescribed Fire': '121', '142WFRPrescribed Fire': '141', '144WFRPrescribed Fire': '142', '161WFRPrescribed Fire': '161', '165WFRPrescribed Fire': '162', '181WFRPrescribed Fire': '181', '182WFRPrescribed Fire': '181', '183WFRPrescribed Fire': '181', '184WFRPrescribed Fire': '181', '187WFRPrescribed Fire': '184', '188WFRPrescribed Fire': '184', '91WTMManual': '91', '98WTMManual': '98', '101WTMManual': '101', '102WTMManual': '102', '122WTMManual': '121', '142WTMManual': '141', '144WTMManual': '141', '161WTMManual': '161', '165WTMManual': '162', '183WTMManual': '181', '184WTMManual': '182', '187WTMManual': '182', '91WTMMastication': '91', '98WTMMastication': '98', '101WTMMastication': '101', '102WTMMastication': '102', '121WTMMastication': '121', '122WTMMastication': '122', '142WTMMastication': '142', '144WTMMastication': '144', '162WTMMastication': '162', '165WTMMastication': '165', '182WTMMastication': '182', '183WTMMastication': '183', '184WTMMastication': '184', '188WTMMastication': '188', '101WTMMechanical': '101', '102WTMMechanical': '102', '121WTMMechanical': '121', '122WTMMechanical': '122', '144WTMMechanical': '144', '145WTMMechanical': '145', '165WTMMechanical': '165', '183WTMMechanical': '183', '184WTMMechanical': '184', '101WTMPrescribed Fire': '101', '121WTMPrescribed Fire': '121', '122WTMPrescribed Fire': '121', '144WTMPrescribed Fire': '142', '161WTMPrescribed Fire': '161', '165WTMPrescribed Fire': '162', '182WTMPrescribed Fire': '181', '183WTMPrescribed Fire': '181', '184WTMPrescribed Fire': '181', '187WTMPrescribed Fire': '184'}
+
+* Write New Post-tx Fuels Raster
+The 'Build a Lookup Table Template' section must be run before this to create combined_text_a.
+
+This loops through the combinations in the LUT to create new combinations and update the post-treatment array. Ideally iterating through the entire FBFM array could be avoided to decrease the run time.
+#+begin_src python :results output :session shared
+import copy
+import csv
+
+import numpy as np
+from osgeo import gdal
+import pandas as pd # only needed if the NP -> PD -> NP idea is used
+import rasterio
+
+# don't want to modify the original; a deep copy probably isn't necessary since Python strings are immutable- not sure
+combined_text_a_copy = copy.deepcopy(combined_text_a)
+
+for mapped_comb in lut_d:
+    print("from lut: ", mapped_comb)
+    #create new-comb as post+(CWHR+TX)
+    if (int(lut_d[mapped_comb]) > 99):
+        new_comb = lut_d[mapped_comb] + mapped_comb[3:]
+    else:
+        new_comb = lut_d[mapped_comb] + mapped_comb[2:]
+    print("from lut with new fbfm: ", new_comb)
+
+    # update the array with the new fuel model where there is a match from the LUT
+    combined_text_a_copy[combined_text_a_copy==mapped_comb] = new_comb
+print("was combined_text_a_copy modified?", np.array_equal(combined_text_a, combined_text_a_copy))
+print("unique text combinations with counts: ", np.asarray(np.unique(combined_text_a_copy, return_counts=True)).T)
+print("number of unique text combinations: ", np.size(np.unique(combined_text_a_copy)))
+
+# extract the FM from the newly updated array
+# this next section is probably why this block is so slow and I'm sure it could be improved
+# TODO: the previous array update is probably fairly fast given that it's only iterating through the combinations in the LUT;
+# the problem is that we need the complete text version of the array for the match but we ultimately only need the first 2 or 3 digits of that string
+# which comprise the fuel model number; is there a way to get just those first 2 or 3 digits without iterating through the entire array?
+
+# Untested idea:
+# Numpy evidently doesn't have a method to pull substrings from array elements; converting to a Pandas dataframe and back is a workaround
+# see https://stackoverflow.com/questions/39042214/how-can-i-slice-each-element-of-a-numpy-array-of-strings
+#first_two_a = np.array(pd.Series(combined_text_a_copy).str[1:3].values)
+#first_three_a = np.array(pd.Series(combined_text_a_copy).str[1:4].values)
+
+# do need a deepcopy here: see https://numpy.org/doc/stable/reference/generated/numpy.copy.html and https://numpy.org/doc/stable/reference/generated/numpy.ndarray.setflags.html
+post_fm_a = copy.deepcopy(combined_text_a_copy)
+
+# iterate through the copied array and update each individual element (np arrays are read-only by default)
+# see https://numpy.org/doc/stable/reference/arrays.nditer.html
+with np.nditer(post_fm_a, op_flags=['readwrite']) as iterator:
+    for element in iterator:
+        if(int(element.tolist()[0:1]) < 9):
+            element[...] = int(element.tolist()[0:3])
+        else:
+            element[...] = int(element.tolist()[0:2])
+
+print("unique combinations of pre_fm_a with counts: ", np.asarray(np.unique(pre_a, return_counts=True)).T)
+print("unique combinations of post_fm_a with counts: ", np.asarray(np.unique(post_fm_a, return_counts=True)).T)
+
+#write post_fm_a to a raster file
+print("almost finished")
+pre_rast = rasterio.open(pre_r, 'r')
+profile = pre_rast.profile
+profile.update(nodata=0, compress='lzw')
+print("before raster write")
+with rasterio.open(post_r, 'w', **profile) as post_rast:
+    post_rast.write(post_fm_a, 1)
+print("finished")
+#+end_src
+
+#+RESULTS:
+#+begin_example
+from lut:  91AGSManual
+from lut with new fbfm:  91AGSManual
+from lut:  93AGSManual
+from lut with new fbfm:  93AGSManual
+from lut:  98AGSManual
+from lut with new fbfm:  98AGSManual
+from lut:  99AGSManual
+from lut with new fbfm:  99AGSManual
+from lut:  101AGSManual
+from lut with new fbfm:  101AGSManual
+from lut:  102AGSManual
+from lut with new fbfm:  102AGSManual
+from lut:  103AGSManual
+from lut with new fbfm:  103AGSManual
+from lut:  121AGSManual
+from lut with new fbfm:  121AGSManual
+from lut:  122AGSManual
+from lut with new fbfm:  121AGSManual
+from lut:  123AGSManual
+from lut with new fbfm:  121AGSManual
+from lut:  141AGSManual
+from lut with new fbfm:  141AGSManual
+from lut:  142AGSManual
+from lut with new fbfm:  141AGSManual
+from lut:  143AGSManual
+from lut with new fbfm:  141AGSManual
+from lut:  144AGSManual
+from lut with new fbfm:  141AGSManual
+from lut:  145AGSManual
+from lut with new fbfm:  142AGSManual
+from lut:  147AGSManual
+from lut with new fbfm:  142AGSManual
+from lut:  161AGSManual
+from lut with new fbfm:  161AGSManual
+from lut:  162AGSManual
+from lut with new fbfm:  161AGSManual
+from lut:  163AGSManual
+from lut with new fbfm:  161AGSManual
+from lut:  165AGSManual
+from lut with new fbfm:  162AGSManual
+from lut:  181AGSManual
+from lut with new fbfm:  181AGSManual
+from lut:  182AGSManual
+from lut with new fbfm:  181AGSManual
+from lut:  183AGSManual
+from lut with new fbfm:  181AGSManual
+from lut:  184AGSManual
+from lut with new fbfm:  181AGSManual
+from lut:  185AGSManual
+from lut with new fbfm:  182AGSManual
+from lut:  186AGSManual
+from lut with new fbfm:  182AGSManual
+from lut:  187AGSManual
+from lut with new fbfm:  182AGSManual
+from lut:  188AGSManual
+from lut with new fbfm:  182AGSManual
+from lut:  189AGSManual
+from lut with new fbfm:  182AGSManual
+from lut:  202AGSManual
+from lut with new fbfm:  182AGSManual
+from lut:  91AGSMastication
+from lut with new fbfm:  91AGSMastication
+from lut:  98AGSMastication
+from lut with new fbfm:  98AGSMastication
+from lut:  99AGSMastication
+from lut with new fbfm:  99AGSMastication
+from lut:  101AGSMastication
+from lut with new fbfm:  101AGSMastication
+from lut:  102AGSMastication
+from lut with new fbfm:  102AGSMastication
+from lut:  103AGSMastication
+from lut with new fbfm:  103AGSMastication
+from lut:  121AGSMastication
+from lut with new fbfm:  121AGSMastication
+from lut:  122AGSMastication
+from lut with new fbfm:  121AGSMastication
+from lut:  141AGSMastication
+from lut with new fbfm:  141AGSMastication
+from lut:  142AGSMastication
+from lut with new fbfm:  141AGSMastication
+from lut:  144AGSMastication
+from lut with new fbfm:  141AGSMastication
+from lut:  145AGSMastication
+from lut with new fbfm:  141AGSMastication
+from lut:  161AGSMastication
+from lut with new fbfm:  161AGSMastication
+from lut:  162AGSMastication
+from lut with new fbfm:  161AGSMastication
+from lut:  165AGSMastication
+from lut with new fbfm:  161AGSMastication
+from lut:  181AGSMastication
+from lut with new fbfm:  182AGSMastication
+from lut:  182AGSMastication
+from lut with new fbfm:  182AGSMastication
+from lut:  183AGSMastication
+from lut with new fbfm:  182AGSMastication
+from lut:  184AGSMastication
+from lut with new fbfm:  182AGSMastication
+from lut:  185AGSMastication
+from lut with new fbfm:  182AGSMastication
+from lut:  186AGSMastication
+from lut with new fbfm:  182AGSMastication
+from lut:  187AGSMastication
+from lut with new fbfm:  182AGSMastication
+from lut:  188AGSMastication
+from lut with new fbfm:  182AGSMastication
+from lut:  91AGSMechanical
+from lut with new fbfm:  91AGSMechanical
+from lut:  93AGSMechanical
+from lut with new fbfm:  93AGSMechanical
+from lut:  98AGSMechanical
+from lut with new fbfm:  98AGSMechanical
+from lut:  99AGSMechanical
+from lut with new fbfm:  99AGSMechanical
+from lut:  101AGSMechanical
+from lut with new fbfm:  101AGSMechanical
+from lut:  102AGSMechanical
+from lut with new fbfm:  102AGSMechanical
+from lut:  103AGSMechanical
+from lut with new fbfm:  103AGSMechanical
+from lut:  121AGSMechanical
+from lut with new fbfm:  121AGSMechanical
+from lut:  122AGSMechanical
+from lut with new fbfm:  121AGSMechanical
+from lut:  141AGSMechanical
+from lut with new fbfm:  141AGSMechanical
+from lut:  142AGSMechanical
+from lut with new fbfm:  141AGSMechanical
+from lut:  144AGSMechanical
+from lut with new fbfm:  142AGSMechanical
+from lut:  145AGSMechanical
+from lut with new fbfm:  142AGSMechanical
+from lut:  161AGSMechanical
+from lut with new fbfm:  161AGSMechanical
+from lut:  162AGSMechanical
+from lut with new fbfm:  161AGSMechanical
+from lut:  165AGSMechanical
+from lut with new fbfm:  162AGSMechanical
+from lut:  181AGSMechanical
+from lut with new fbfm:  181AGSMechanical
+from lut:  182AGSMechanical
+from lut with new fbfm:  181AGSMechanical
+from lut:  183AGSMechanical
+from lut with new fbfm:  181AGSMechanical
+from lut:  184AGSMechanical
+from lut with new fbfm:  181AGSMechanical
+from lut:  185AGSMechanical
+from lut with new fbfm:  184AGSMechanical
+from lut:  186AGSMechanical
+from lut with new fbfm:  184AGSMechanical
+from lut:  187AGSMechanical
+from lut with new fbfm:  184AGSMechanical
+from lut:  188AGSMechanical
+from lut with new fbfm:  184AGSMechanical
+from lut:  145ASPManual
+from lut with new fbfm:  142ASPManual
+from lut:  165ASPManual
+from lut with new fbfm:  162ASPManual
+from lut:  91ASPMastication
+from lut with new fbfm:  91ASPMastication
+from lut:  99ASPMastication
+from lut with new fbfm:  99ASPMastication
+from lut:  102ASPMastication
+from lut with new fbfm:  102ASPMastication
+from lut:  103ASPMastication
+from lut with new fbfm:  103ASPMastication
+from lut:  122ASPMastication
+from lut with new fbfm:  121ASPMastication
+from lut:  142ASPMastication
+from lut with new fbfm:  141ASPMastication
+from lut:  165ASPMastication
+from lut with new fbfm:  161ASPMastication
+from lut:  181ASPMastication
+from lut with new fbfm:  182ASPMastication
+from lut:  183ASPMastication
+from lut with new fbfm:  182ASPMastication
+from lut:  142ASPMechanical
+from lut with new fbfm:  141ASPMechanical
+from lut:  161ASPMechanical
+from lut with new fbfm:  161ASPMechanical
+from lut:  165ASPMechanical
+from lut with new fbfm:  162ASPMechanical
+from lut:  181ASPMechanical
+from lut with new fbfm:  181ASPMechanical
+from lut:  182ASPMechanical
+from lut with new fbfm:  181ASPMechanical
+from lut:  183ASPMechanical
+from lut with new fbfm:  181ASPMechanical
+from lut:  91BARManual
+from lut with new fbfm:  91BARManual
+from lut:  98BARManual
+from lut with new fbfm:  98BARManual
+from lut:  99BARManual
+from lut with new fbfm:  99BARManual
+from lut:  101BARManual
+from lut with new fbfm:  101BARManual
+from lut:  102BARManual
+from lut with new fbfm:  102BARManual
+from lut:  103BARManual
+from lut with new fbfm:  103BARManual
+from lut:  121BARManual
+from lut with new fbfm:  121BARManual
+from lut:  122BARManual
+from lut with new fbfm:  121BARManual
+from lut:  141BARManual
+from lut with new fbfm:  141BARManual
+from lut:  142BARManual
+from lut with new fbfm:  141BARManual
+from lut:  143BARManual
+from lut with new fbfm:  141BARManual
+from lut:  144BARManual
+from lut with new fbfm:  141BARManual
+from lut:  145BARManual
+from lut with new fbfm:  142BARManual
+from lut:  147BARManual
+from lut with new fbfm:  142BARManual
+from lut:  161BARManual
+from lut with new fbfm:  161BARManual
+from lut:  162BARManual
+from lut with new fbfm:  161BARManual
+from lut:  163BARManual
+from lut with new fbfm:  161BARManual
+from lut:  165BARManual
+from lut with new fbfm:  162BARManual
+from lut:  181BARManual
+from lut with new fbfm:  181BARManual
+from lut:  182BARManual
+from lut with new fbfm:  181BARManual
+from lut:  183BARManual
+from lut with new fbfm:  181BARManual
+from lut:  184BARManual
+from lut with new fbfm:  181BARManual
+from lut:  185BARManual
+from lut with new fbfm:  182BARManual
+from lut:  186BARManual
+from lut with new fbfm:  182BARManual
+from lut:  187BARManual
+from lut with new fbfm:  182BARManual
+from lut:  188BARManual
+from lut with new fbfm:  182BARManual
+from lut:  189BARManual
+from lut with new fbfm:  182BARManual
+from lut:  98BARMastication
+from lut with new fbfm:  98BARMastication
+from lut:  102BARMastication
+from lut with new fbfm:  102BARMastication
+from lut:  103BARMastication
+from lut with new fbfm:  103BARMastication
+from lut:  121BARMastication
+from lut with new fbfm:  121BARMastication
+from lut:  122BARMastication
+from lut with new fbfm:  122BARMastication
+from lut:  144BARMastication
+from lut with new fbfm:  144BARMastication
+from lut:  145BARMastication
+from lut with new fbfm:  145BARMastication
+from lut:  163BARMastication
+from lut with new fbfm:  163BARMastication
+from lut:  165BARMastication
+from lut with new fbfm:  165BARMastication
+from lut:  181BARMastication
+from lut with new fbfm:  181BARMastication
+from lut:  183BARMastication
+from lut with new fbfm:  183BARMastication
+from lut:  91BOPMechanical
+from lut with new fbfm:  91BOPMechanical
+from lut:  98BOPMechanical
+from lut with new fbfm:  98BOPMechanical
+from lut:  101BOPMechanical
+from lut with new fbfm:  101BOPMechanical
+from lut:  102BOPMechanical
+from lut with new fbfm:  102BOPMechanical
+from lut:  103BOPMechanical
+from lut with new fbfm:  103BOPMechanical
+from lut:  121BOPMechanical
+from lut with new fbfm:  121BOPMechanical
+from lut:  122BOPMechanical
+from lut with new fbfm:  121BOPMechanical
+from lut:  141BOPMechanical
+from lut with new fbfm:  141BOPMechanical
+from lut:  142BOPMechanical
+from lut with new fbfm:  141BOPMechanical
+from lut:  144BOPMechanical
+from lut with new fbfm:  142BOPMechanical
+from lut:  145BOPMechanical
+from lut with new fbfm:  142BOPMechanical
+from lut:  162BOPMechanical
+from lut with new fbfm:  161BOPMechanical
+from lut:  163BOPMechanical
+from lut with new fbfm:  161BOPMechanical
+from lut:  165BOPMechanical
+from lut with new fbfm:  162BOPMechanical
+from lut:  181BOPMechanical
+from lut with new fbfm:  181BOPMechanical
+from lut:  182BOPMechanical
+from lut with new fbfm:  181BOPMechanical
+from lut:  183BOPMechanical
+from lut with new fbfm:  181BOPMechanical
+from lut:  184BOPMechanical
+from lut with new fbfm:  181BOPMechanical
+from lut:  186BOPMechanical
+from lut with new fbfm:  184BOPMechanical
+from lut:  187BOPMechanical
+from lut with new fbfm:  184BOPMechanical
+from lut:  188BOPMechanical
+from lut with new fbfm:  184BOPMechanical
+from lut:  189BOPMechanical
+from lut with new fbfm:  181BOPMechanical
+from lut:  91CPCManual
+from lut with new fbfm:  91CPCManual
+from lut:  91CPCMechanical
+from lut with new fbfm:  91CPCMechanical
+from lut:  144CPCMechanical
+from lut with new fbfm:  142CPCMechanical
+from lut:  162CPCMechanical
+from lut with new fbfm:  161CPCMechanical
+from lut:  181CPCMechanical
+from lut with new fbfm:  181CPCMechanical
+from lut:  182CPCMechanical
+from lut with new fbfm:  181CPCMechanical
+from lut:  91CRPManual
+from lut with new fbfm:  91CRPManual
+from lut:  93CRPManual
+from lut with new fbfm:  93CRPManual
+from lut:  98CRPManual
+from lut with new fbfm:  98CRPManual
+from lut:  101CRPManual
+from lut with new fbfm:  101CRPManual
+from lut:  102CRPManual
+from lut with new fbfm:  102CRPManual
+from lut:  103CRPManual
+from lut with new fbfm:  103CRPManual
+from lut:  121CRPManual
+from lut with new fbfm:  121CRPManual
+from lut:  122CRPManual
+from lut with new fbfm:  122CRPManual
+from lut:  141CRPManual
+from lut with new fbfm:  141CRPManual
+from lut:  142CRPManual
+from lut with new fbfm:  142CRPManual
+from lut:  144CRPManual
+from lut with new fbfm:  144CRPManual
+from lut:  161CRPManual
+from lut with new fbfm:  161CRPManual
+from lut:  182CRPManual
+from lut with new fbfm:  182CRPManual
+from lut:  185CRPManual
+from lut with new fbfm:  185CRPManual
+from lut:  98DFRMechanical
+from lut with new fbfm:  98DFRMechanical
+from lut:  101DFRMechanical
+from lut with new fbfm:  101DFRMechanical
+from lut:  102DFRMechanical
+from lut with new fbfm:  102DFRMechanical
+from lut:  103DFRMechanical
+from lut with new fbfm:  103DFRMechanical
+from lut:  121DFRMechanical
+from lut with new fbfm:  121DFRMechanical
+from lut:  142DFRMechanical
+from lut with new fbfm:  141DFRMechanical
+from lut:  144DFRMechanical
+from lut with new fbfm:  142DFRMechanical
+from lut:  162DFRMechanical
+from lut with new fbfm:  161DFRMechanical
+from lut:  181DFRMechanical
+from lut with new fbfm:  181DFRMechanical
+from lut:  182DFRMechanical
+from lut with new fbfm:  181DFRMechanical
+from lut:  183DFRMechanical
+from lut with new fbfm:  181DFRMechanical
+from lut:  184DFRMechanical
+from lut with new fbfm:  181DFRMechanical
+from lut:  186DFRMechanical
+from lut with new fbfm:  184DFRMechanical
+from lut:  188DFRMechanical
+from lut with new fbfm:  184DFRMechanical
+from lut:  91EPNManual
+from lut with new fbfm:  91EPNManual
+from lut:  98EPNManual
+from lut with new fbfm:  98EPNManual
+from lut:  101EPNManual
+from lut with new fbfm:  101EPNManual
+from lut:  102EPNManual
+from lut with new fbfm:  102EPNManual
+from lut:  121EPNManual
+from lut with new fbfm:  121EPNManual
+from lut:  122EPNManual
+from lut with new fbfm:  121EPNManual
+from lut:  142EPNManual
+from lut with new fbfm:  141EPNManual
+from lut:  144EPNManual
+from lut with new fbfm:  141EPNManual
+from lut:  145EPNManual
+from lut with new fbfm:  142EPNManual
+from lut:  162EPNManual
+from lut with new fbfm:  161EPNManual
+from lut:  165EPNManual
+from lut with new fbfm:  162EPNManual
+from lut:  181EPNManual
+from lut with new fbfm:  181EPNManual
+from lut:  182EPNManual
+from lut with new fbfm:  181EPNManual
+from lut:  183EPNManual
+from lut with new fbfm:  181EPNManual
+from lut:  184EPNManual
+from lut with new fbfm:  182EPNManual
+from lut:  185EPNManual
+from lut with new fbfm:  182EPNManual
+from lut:  186EPNManual
+from lut with new fbfm:  182EPNManual
+from lut:  188EPNManual
+from lut with new fbfm:  182EPNManual
+from lut:  91EPNMechanical
+from lut with new fbfm:  91EPNMechanical
+from lut:  98EPNMechanical
+from lut with new fbfm:  98EPNMechanical
+from lut:  99EPNMechanical
+from lut with new fbfm:  99EPNMechanical
+from lut:  101EPNMechanical
+from lut with new fbfm:  101EPNMechanical
+from lut:  102EPNMechanical
+from lut with new fbfm:  102EPNMechanical
+from lut:  103EPNMechanical
+from lut with new fbfm:  103EPNMechanical
+from lut:  121EPNMechanical
+from lut with new fbfm:  121EPNMechanical
+from lut:  122EPNMechanical
+from lut with new fbfm:  121EPNMechanical
+from lut:  141EPNMechanical
+from lut with new fbfm:  141EPNMechanical
+from lut:  142EPNMechanical
+from lut with new fbfm:  141EPNMechanical
+from lut:  144EPNMechanical
+from lut with new fbfm:  142EPNMechanical
+from lut:  145EPNMechanical
+from lut with new fbfm:  142EPNMechanical
+from lut:  147EPNMechanical
+from lut with new fbfm:  142EPNMechanical
+from lut:  161EPNMechanical
+from lut with new fbfm:  161EPNMechanical
+from lut:  162EPNMechanical
+from lut with new fbfm:  161EPNMechanical
+from lut:  165EPNMechanical
+from lut with new fbfm:  162EPNMechanical
+from lut:  181EPNMechanical
+from lut with new fbfm:  181EPNMechanical
+from lut:  182EPNMechanical
+from lut with new fbfm:  181EPNMechanical
+from lut:  183EPNMechanical
+from lut with new fbfm:  181EPNMechanical
+from lut:  184EPNMechanical
+from lut with new fbfm:  181EPNMechanical
+from lut:  185EPNMechanical
+from lut with new fbfm:  184EPNMechanical
+from lut:  186EPNMechanical
+from lut with new fbfm:  184EPNMechanical
+from lut:  187EPNMechanical
+from lut with new fbfm:  184EPNMechanical
+from lut:  188EPNMechanical
+from lut with new fbfm:  184EPNMechanical
+from lut:  189EPNMechanical
+from lut with new fbfm:  181EPNMechanical
+from lut:  103JPNManual
+from lut with new fbfm:  103JPNManual
+from lut:  121JPNManual
+from lut with new fbfm:  121JPNManual
+from lut:  122JPNManual
+from lut with new fbfm:  121JPNManual
+from lut:  144JPNManual
+from lut with new fbfm:  141JPNManual
+from lut:  145JPNManual
+from lut with new fbfm:  142JPNManual
+from lut:  162JPNManual
+from lut with new fbfm:  161JPNManual
+from lut:  165JPNManual
+from lut with new fbfm:  162JPNManual
+from lut:  181JPNManual
+from lut with new fbfm:  181JPNManual
+from lut:  183JPNManual
+from lut with new fbfm:  181JPNManual
+from lut:  91JPNMechanical
+from lut with new fbfm:  91JPNMechanical
+from lut:  102JPNMechanical
+from lut with new fbfm:  102JPNMechanical
+from lut:  103JPNMechanical
+from lut with new fbfm:  103JPNMechanical
+from lut:  121JPNMechanical
+from lut with new fbfm:  121JPNMechanical
+from lut:  122JPNMechanical
+from lut with new fbfm:  121JPNMechanical
+from lut:  141JPNMechanical
+from lut with new fbfm:  141JPNMechanical
+from lut:  142JPNMechanical
+from lut with new fbfm:  141JPNMechanical
+from lut:  144JPNMechanical
+from lut with new fbfm:  142JPNMechanical
+from lut:  145JPNMechanical
+from lut with new fbfm:  142JPNMechanical
+from lut:  161JPNMechanical
+from lut with new fbfm:  161JPNMechanical
+from lut:  162JPNMechanical
+from lut with new fbfm:  161JPNMechanical
+from lut:  165JPNMechanical
+from lut with new fbfm:  162JPNMechanical
+from lut:  181JPNMechanical
+from lut with new fbfm:  181JPNMechanical
+from lut:  182JPNMechanical
+from lut with new fbfm:  181JPNMechanical
+from lut:  183JPNMechanical
+from lut with new fbfm:  181JPNMechanical
+from lut:  184JPNMechanical
+from lut with new fbfm:  181JPNMechanical
+from lut:  186JPNMechanical
+from lut with new fbfm:  184JPNMechanical
+from lut:  188JPNMechanical
+from lut with new fbfm:  184JPNMechanical
+from lut:  165JPNPrescribed Fire
+from lut with new fbfm:  162JPNPrescribed Fire
+from lut:  91LACManual
+from lut with new fbfm:  91LACManual
+from lut:  98LACManual
+from lut with new fbfm:  98LACManual
+from lut:  99LACManual
+from lut with new fbfm:  99LACManual
+from lut:  101LACManual
+from lut with new fbfm:  101LACManual
+from lut:  102LACManual
+from lut with new fbfm:  102LACManual
+from lut:  103LACManual
+from lut with new fbfm:  103LACManual
+from lut:  121LACManual
+from lut with new fbfm:  121LACManual
+from lut:  122LACManual
+from lut with new fbfm:  121LACManual
+from lut:  141LACManual
+from lut with new fbfm:  141LACManual
+from lut:  142LACManual
+from lut with new fbfm:  142LACManual
+from lut:  144LACManual
+from lut with new fbfm:  144LACManual
+from lut:  145LACManual
+from lut with new fbfm:  145LACManual
+from lut:  161LACManual
+from lut with new fbfm:  161LACManual
+from lut:  162LACManual
+from lut with new fbfm:  162LACManual
+from lut:  163LACManual
+from lut with new fbfm:  163LACManual
+from lut:  165LACManual
+from lut with new fbfm:  165LACManual
+from lut:  181LACManual
+from lut with new fbfm:  181LACManual
+from lut:  182LACManual
+from lut with new fbfm:  182LACManual
+from lut:  183LACManual
+from lut with new fbfm:  183LACManual
+from lut:  184LACManual
+from lut with new fbfm:  184LACManual
+from lut:  186LACManual
+from lut with new fbfm:  186LACManual
+from lut:  187LACManual
+from lut with new fbfm:  187LACManual
+from lut:  188LACManual
+from lut with new fbfm:  188LACManual
+from lut:  98LACMastication
+from lut with new fbfm:  98LACMastication
+from lut:  102LACMastication
+from lut with new fbfm:  102LACMastication
+from lut:  121LACMastication
+from lut with new fbfm:  121LACMastication
+from lut:  122LACMastication
+from lut with new fbfm:  122LACMastication
+from lut:  165LACMastication
+from lut with new fbfm:  165LACMastication
+from lut:  181LACMastication
+from lut with new fbfm:  181LACMastication
+from lut:  98LPNManual
+from lut with new fbfm:  98LPNManual
+from lut:  141LPNManual
+from lut with new fbfm:  141LPNManual
+from lut:  162LPNManual
+from lut with new fbfm:  161LPNManual
+from lut:  165LPNManual
+from lut with new fbfm:  162LPNManual
+from lut:  183LPNManual
+from lut with new fbfm:  182LPNManual
+from lut:  187LPNManual
+from lut with new fbfm:  182LPNManual
+from lut:  188LPNManual
+from lut with new fbfm:  182LPNManual
+from lut:  91LPNMechanical
+from lut with new fbfm:  91LPNMechanical
+from lut:  98LPNMechanical
+from lut with new fbfm:  98LPNMechanical
+from lut:  102LPNMechanical
+from lut with new fbfm:  102LPNMechanical
+from lut:  121LPNMechanical
+from lut with new fbfm:  121LPNMechanical
+from lut:  122LPNMechanical
+from lut with new fbfm:  121LPNMechanical
+from lut:  141LPNMechanical
+from lut with new fbfm:  141LPNMechanical
+from lut:  142LPNMechanical
+from lut with new fbfm:  141LPNMechanical
+from lut:  144LPNMechanical
+from lut with new fbfm:  142LPNMechanical
+from lut:  162LPNMechanical
+from lut with new fbfm:  161LPNMechanical
+from lut:  165LPNMechanical
+from lut with new fbfm:  162LPNMechanical
+from lut:  181LPNMechanical
+from lut with new fbfm:  181LPNMechanical
+from lut:  183LPNMechanical
+from lut with new fbfm:  181LPNMechanical
+from lut:  184LPNMechanical
+from lut with new fbfm:  181LPNMechanical
+from lut:  187LPNMechanical
+from lut with new fbfm:  184LPNMechanical
+from lut:  188LPNMechanical
+from lut with new fbfm:  184LPNMechanical
+from lut:  122LPNPrescribed Fire
+from lut with new fbfm:  121LPNPrescribed Fire
+from lut:  144LPNPrescribed Fire
+from lut with new fbfm:  142LPNPrescribed Fire
+from lut:  165LPNPrescribed Fire
+from lut with new fbfm:  162LPNPrescribed Fire
+from lut:  182LPNPrescribed Fire
+from lut with new fbfm:  181LPNPrescribed Fire
+from lut:  183LPNPrescribed Fire
+from lut with new fbfm:  181LPNPrescribed Fire
+from lut:  184LPNPrescribed Fire
+from lut with new fbfm:  181LPNPrescribed Fire
+from lut:  187LPNPrescribed Fire
+from lut with new fbfm:  184LPNPrescribed Fire
+from lut:  188LPNPrescribed Fire
+from lut with new fbfm:  184LPNPrescribed Fire
+from lut:  102LSGManual
+from lut with new fbfm:  102LSGManual
+from lut:  121LSGManual
+from lut with new fbfm:  121LSGManual
+from lut:  91LSGMechanical
+from lut with new fbfm:  91LSGMechanical
+from lut:  98LSGMechanical
+from lut with new fbfm:  98LSGMechanical
+from lut:  101LSGMechanical
+from lut with new fbfm:  101LSGMechanical
+from lut:  102LSGMechanical
+from lut with new fbfm:  102LSGMechanical
+from lut:  121LSGMechanical
+from lut with new fbfm:  121LSGMechanical
+from lut:  122LSGMechanical
+from lut with new fbfm:  121LSGMechanical
+from lut:  144LSGMechanical
+from lut with new fbfm:  142LSGMechanical
+from lut:  161LSGMechanical
+from lut with new fbfm:  161LSGMechanical
+from lut:  98MCHManual
+from lut with new fbfm:  98MCHManual
+from lut:  102MCHManual
+from lut with new fbfm:  102MCHManual
+from lut:  103MCHManual
+from lut with new fbfm:  103MCHManual
+from lut:  121MCHManual
+from lut with new fbfm:  121MCHManual
+from lut:  122MCHManual
+from lut with new fbfm:  121MCHManual
+from lut:  141MCHManual
+from lut with new fbfm:  141MCHManual
+from lut:  142MCHManual
+from lut with new fbfm:  141MCHManual
+from lut:  144MCHManual
+from lut with new fbfm:  141MCHManual
+from lut:  145MCHManual
+from lut with new fbfm:  142MCHManual
+from lut:  161MCHManual
+from lut with new fbfm:  161MCHManual
+from lut:  162MCHManual
+from lut with new fbfm:  161MCHManual
+from lut:  165MCHManual
+from lut with new fbfm:  162MCHManual
+from lut:  181MCHManual
+from lut with new fbfm:  181MCHManual
+from lut:  182MCHManual
+from lut with new fbfm:  181MCHManual
+from lut:  183MCHManual
+from lut with new fbfm:  181MCHManual
+from lut:  184MCHManual
+from lut with new fbfm:  181MCHManual
+from lut:  186MCHManual
+from lut with new fbfm:  182MCHManual
+from lut:  188MCHManual
+from lut with new fbfm:  182MCHManual
+from lut:  91MCHMastication
+from lut with new fbfm:  91MCHMastication
+from lut:  98MCHMastication
+from lut with new fbfm:  98MCHMastication
+from lut:  101MCHMastication
+from lut with new fbfm:  101MCHMastication
+from lut:  102MCHMastication
+from lut with new fbfm:  102MCHMastication
+from lut:  103MCHMastication
+from lut with new fbfm:  103MCHMastication
+from lut:  121MCHMastication
+from lut with new fbfm:  121MCHMastication
+from lut:  122MCHMastication
+from lut with new fbfm:  121MCHMastication
+from lut:  141MCHMastication
+from lut with new fbfm:  141MCHMastication
+from lut:  142MCHMastication
+from lut with new fbfm:  141MCHMastication
+from lut:  144MCHMastication
+from lut with new fbfm:  141MCHMastication
+from lut:  145MCHMastication
+from lut with new fbfm:  141MCHMastication
+from lut:  162MCHMastication
+from lut with new fbfm:  161MCHMastication
+from lut:  165MCHMastication
+from lut with new fbfm:  161MCHMastication
+from lut:  181MCHMastication
+from lut with new fbfm:  182MCHMastication
+from lut:  183MCHMastication
+from lut with new fbfm:  182MCHMastication
+from lut:  184MCHMastication
+from lut with new fbfm:  182MCHMastication
+from lut:  185MCHMastication
+from lut with new fbfm:  182MCHMastication
+from lut:  186MCHMastication
+from lut with new fbfm:  182MCHMastication
+from lut:  187MCHMastication
+from lut with new fbfm:  182MCHMastication
+from lut:  188MCHMastication
+from lut with new fbfm:  182MCHMastication
+from lut:  91MCHMechanical
+from lut with new fbfm:  91MCHMechanical
+from lut:  98MCHMechanical
+from lut with new fbfm:  98MCHMechanical
+from lut:  99MCHMechanical
+from lut with new fbfm:  99MCHMechanical
+from lut:  101MCHMechanical
+from lut with new fbfm:  101MCHMechanical
+from lut:  102MCHMechanical
+from lut with new fbfm:  102MCHMechanical
+from lut:  103MCHMechanical
+from lut with new fbfm:  103MCHMechanical
+from lut:  121MCHMechanical
+from lut with new fbfm:  121MCHMechanical
+from lut:  122MCHMechanical
+from lut with new fbfm:  121MCHMechanical
+from lut:  141MCHMechanical
+from lut with new fbfm:  141MCHMechanical
+from lut:  142MCHMechanical
+from lut with new fbfm:  141MCHMechanical
+from lut:  144MCHMechanical
+from lut with new fbfm:  142MCHMechanical
+from lut:  145MCHMechanical
+from lut with new fbfm:  142MCHMechanical
+from lut:  161MCHMechanical
+from lut with new fbfm:  161MCHMechanical
+from lut:  162MCHMechanical
+from lut with new fbfm:  161MCHMechanical
+from lut:  163MCHMechanical
+from lut with new fbfm:  161MCHMechanical
+from lut:  165MCHMechanical
+from lut with new fbfm:  162MCHMechanical
+from lut:  181MCHMechanical
+from lut with new fbfm:  181MCHMechanical
+from lut:  182MCHMechanical
+from lut with new fbfm:  181MCHMechanical
+from lut:  183MCHMechanical
+from lut with new fbfm:  181MCHMechanical
+from lut:  184MCHMechanical
+from lut with new fbfm:  181MCHMechanical
+from lut:  186MCHMechanical
+from lut with new fbfm:  184MCHMechanical
+from lut:  188MCHMechanical
+from lut with new fbfm:  184MCHMechanical
+from lut:  189MCHMechanical
+from lut with new fbfm:  181MCHMechanical
+from lut:  91MCPManual
+from lut with new fbfm:  91MCPManual
+from lut:  98MCPManual
+from lut with new fbfm:  98MCPManual
+from lut:  101MCPManual
+from lut with new fbfm:  101MCPManual
+from lut:  102MCPManual
+from lut with new fbfm:  102MCPManual
+from lut:  103MCPManual
+from lut with new fbfm:  103MCPManual
+from lut:  121MCPManual
+from lut with new fbfm:  121MCPManual
+from lut:  122MCPManual
+from lut with new fbfm:  121MCPManual
+from lut:  141MCPManual
+from lut with new fbfm:  141MCPManual
+from lut:  142MCPManual
+from lut with new fbfm:  141MCPManual
+from lut:  144MCPManual
+from lut with new fbfm:  141MCPManual
+from lut:  145MCPManual
+from lut with new fbfm:  142MCPManual
+from lut:  161MCPManual
+from lut with new fbfm:  161MCPManual
+from lut:  162MCPManual
+from lut with new fbfm:  161MCPManual
+from lut:  165MCPManual
+from lut with new fbfm:  162MCPManual
+from lut:  181MCPManual
+from lut with new fbfm:  181MCPManual
+from lut:  182MCPManual
+from lut with new fbfm:  181MCPManual
+from lut:  183MCPManual
+from lut with new fbfm:  181MCPManual
+from lut:  184MCPManual
+from lut with new fbfm:  181MCPManual
+from lut:  185MCPManual
+from lut with new fbfm:  182MCPManual
+from lut:  186MCPManual
+from lut with new fbfm:  182MCPManual
+from lut:  187MCPManual
+from lut with new fbfm:  182MCPManual
+from lut:  188MCPManual
+from lut with new fbfm:  182MCPManual
+from lut:  91MCPMastication
+from lut with new fbfm:  91MCPMastication
+from lut:  99MCPMastication
+from lut with new fbfm:  99MCPMastication
+from lut:  101MCPMastication
+from lut with new fbfm:  101MCPMastication
+from lut:  102MCPMastication
+from lut with new fbfm:  102MCPMastication
+from lut:  103MCPMastication
+from lut with new fbfm:  103MCPMastication
+from lut:  121MCPMastication
+from lut with new fbfm:  121MCPMastication
+from lut:  122MCPMastication
+from lut with new fbfm:  121MCPMastication
+from lut:  141MCPMastication
+from lut with new fbfm:  141MCPMastication
+from lut:  142MCPMastication
+from lut with new fbfm:  141MCPMastication
+from lut:  144MCPMastication
+from lut with new fbfm:  141MCPMastication
+from lut:  145MCPMastication
+from lut with new fbfm:  141MCPMastication
+from lut:  147MCPMastication
+from lut with new fbfm:  141MCPMastication
+from lut:  161MCPMastication
+from lut with new fbfm:  161MCPMastication
+from lut:  162MCPMastication
+from lut with new fbfm:  161MCPMastication
+from lut:  165MCPMastication
+from lut with new fbfm:  161MCPMastication
+from lut:  181MCPMastication
+from lut with new fbfm:  182MCPMastication
+from lut:  182MCPMastication
+from lut with new fbfm:  182MCPMastication
+from lut:  183MCPMastication
+from lut with new fbfm:  182MCPMastication
+from lut:  184MCPMastication
+from lut with new fbfm:  182MCPMastication
+from lut:  185MCPMastication
+from lut with new fbfm:  182MCPMastication
+from lut:  186MCPMastication
+from lut with new fbfm:  182MCPMastication
+from lut:  187MCPMastication
+from lut with new fbfm:  182MCPMastication
+from lut:  188MCPMastication
+from lut with new fbfm:  182MCPMastication
+from lut:  91MCPMechanical
+from lut with new fbfm:  91MCPMechanical
+from lut:  98MCPMechanical
+from lut with new fbfm:  98MCPMechanical
+from lut:  99MCPMechanical
+from lut with new fbfm:  99MCPMechanical
+from lut:  101MCPMechanical
+from lut with new fbfm:  101MCPMechanical
+from lut:  102MCPMechanical
+from lut with new fbfm:  102MCPMechanical
+from lut:  103MCPMechanical
+from lut with new fbfm:  103MCPMechanical
+from lut:  121MCPMechanical
+from lut with new fbfm:  121MCPMechanical
+from lut:  122MCPMechanical
+from lut with new fbfm:  121MCPMechanical
+from lut:  141MCPMechanical
+from lut with new fbfm:  141MCPMechanical
+from lut:  142MCPMechanical
+from lut with new fbfm:  141MCPMechanical
+from lut:  143MCPMechanical
+from lut with new fbfm:  141MCPMechanical
+from lut:  144MCPMechanical
+from lut with new fbfm:  142MCPMechanical
+from lut:  145MCPMechanical
+from lut with new fbfm:  142MCPMechanical
+from lut:  161MCPMechanical
+from lut with new fbfm:  161MCPMechanical
+from lut:  162MCPMechanical
+from lut with new fbfm:  161MCPMechanical
+from lut:  165MCPMechanical
+from lut with new fbfm:  162MCPMechanical
+from lut:  181MCPMechanical
+from lut with new fbfm:  181MCPMechanical
+from lut:  182MCPMechanical
+from lut with new fbfm:  181MCPMechanical
+from lut:  183MCPMechanical
+from lut with new fbfm:  181MCPMechanical
+from lut:  184MCPMechanical
+from lut with new fbfm:  181MCPMechanical
+from lut:  186MCPMechanical
+from lut with new fbfm:  184MCPMechanical
+from lut:  187MCPMechanical
+from lut with new fbfm:  184MCPMechanical
+from lut:  188MCPMechanical
+from lut with new fbfm:  184MCPMechanical
+from lut:  98MCPPrescribed Fire
+from lut with new fbfm:  98MCPPrescribed Fire
+from lut:  99MCPPrescribed Fire
+from lut with new fbfm:  99MCPPrescribed Fire
+from lut:  101MCPPrescribed Fire
+from lut with new fbfm:  101MCPPrescribed Fire
+from lut:  102MCPPrescribed Fire
+from lut with new fbfm:  101MCPPrescribed Fire
+from lut:  121MCPPrescribed Fire
+from lut with new fbfm:  121MCPPrescribed Fire
+from lut:  122MCPPrescribed Fire
+from lut with new fbfm:  121MCPPrescribed Fire
+from lut:  141MCPPrescribed Fire
+from lut with new fbfm:  141MCPPrescribed Fire
+from lut:  142MCPPrescribed Fire
+from lut with new fbfm:  141MCPPrescribed Fire
+from lut:  144MCPPrescribed Fire
+from lut with new fbfm:  142MCPPrescribed Fire
+from lut:  161MCPPrescribed Fire
+from lut with new fbfm:  161MCPPrescribed Fire
+from lut:  162MCPPrescribed Fire
+from lut with new fbfm:  161MCPPrescribed Fire
+from lut:  165MCPPrescribed Fire
+from lut with new fbfm:  162MCPPrescribed Fire
+from lut:  181MCPPrescribed Fire
+from lut with new fbfm:  181MCPPrescribed Fire
+from lut:  182MCPPrescribed Fire
+from lut with new fbfm:  181MCPPrescribed Fire
+from lut:  183MCPPrescribed Fire
+from lut with new fbfm:  181MCPPrescribed Fire
+from lut:  184MCPPrescribed Fire
+from lut with new fbfm:  181MCPPrescribed Fire
+from lut:  186MCPPrescribed Fire
+from lut with new fbfm:  184MCPPrescribed Fire
+from lut:  187MCPPrescribed Fire
+from lut with new fbfm:  184MCPPrescribed Fire
+from lut:  188MCPPrescribed Fire
+from lut with new fbfm:  184MCPPrescribed Fire
+from lut:  91MHCManual
+from lut with new fbfm:  91MHCManual
+from lut:  98MHCManual
+from lut with new fbfm:  98MHCManual
+from lut:  102MHCManual
+from lut with new fbfm:  102MHCManual
+from lut:  103MHCManual
+from lut with new fbfm:  103MHCManual
+from lut:  121MHCManual
+from lut with new fbfm:  121MHCManual
+from lut:  122MHCManual
+from lut with new fbfm:  121MHCManual
+from lut:  141MHCManual
+from lut with new fbfm:  141MHCManual
+from lut:  142MHCManual
+from lut with new fbfm:  141MHCManual
+from lut:  144MHCManual
+from lut with new fbfm:  141MHCManual
+from lut:  145MHCManual
+from lut with new fbfm:  142MHCManual
+from lut:  161MHCManual
+from lut with new fbfm:  161MHCManual
+from lut:  162MHCManual
+from lut with new fbfm:  161MHCManual
+from lut:  165MHCManual
+from lut with new fbfm:  162MHCManual
+from lut:  181MHCManual
+from lut with new fbfm:  181MHCManual
+from lut:  182MHCManual
+from lut with new fbfm:  181MHCManual
+from lut:  183MHCManual
+from lut with new fbfm:  181MHCManual
+from lut:  184MHCManual
+from lut with new fbfm:  181MHCManual
+from lut:  186MHCManual
+from lut with new fbfm:  182MHCManual
+from lut:  187MHCManual
+from lut with new fbfm:  182MHCManual
+from lut:  188MHCManual
+from lut with new fbfm:  182MHCManual
+from lut:  189MHCManual
+from lut with new fbfm:  182MHCManual
+from lut:  91MHCMastication
+from lut with new fbfm:  91MHCMastication
+from lut:  102MHCMastication
+from lut with new fbfm:  102MHCMastication
+from lut:  122MHCMastication
+from lut with new fbfm:  121MHCMastication
+from lut:  142MHCMastication
+from lut with new fbfm:  141MHCMastication
+from lut:  144MHCMastication
+from lut with new fbfm:  141MHCMastication
+from lut:  145MHCMastication
+from lut with new fbfm:  141MHCMastication
+from lut:  162MHCMastication
+from lut with new fbfm:  161MHCMastication
+from lut:  165MHCMastication
+from lut with new fbfm:  161MHCMastication
+from lut:  183MHCMastication
+from lut with new fbfm:  182MHCMastication
+from lut:  184MHCMastication
+from lut with new fbfm:  182MHCMastication
+from lut:  186MHCMastication
+from lut with new fbfm:  182MHCMastication
+from lut:  187MHCMastication
+from lut with new fbfm:  182MHCMastication
+from lut:  188MHCMastication
+from lut with new fbfm:  182MHCMastication
+from lut:  189MHCMastication
+from lut with new fbfm:  182MHCMastication
+from lut:  91MHCMechanical
+from lut with new fbfm:  91MHCMechanical
+from lut:  98MHCMechanical
+from lut with new fbfm:  98MHCMechanical
+from lut:  99MHCMechanical
+from lut with new fbfm:  99MHCMechanical
+from lut:  101MHCMechanical
+from lut with new fbfm:  101MHCMechanical
+from lut:  102MHCMechanical
+from lut with new fbfm:  102MHCMechanical
+from lut:  103MHCMechanical
+from lut with new fbfm:  103MHCMechanical
+from lut:  121MHCMechanical
+from lut with new fbfm:  121MHCMechanical
+from lut:  122MHCMechanical
+from lut with new fbfm:  121MHCMechanical
+from lut:  141MHCMechanical
+from lut with new fbfm:  141MHCMechanical
+from lut:  142MHCMechanical
+from lut with new fbfm:  141MHCMechanical
+from lut:  144MHCMechanical
+from lut with new fbfm:  142MHCMechanical
+from lut:  145MHCMechanical
+from lut with new fbfm:  142MHCMechanical
+from lut:  161MHCMechanical
+from lut with new fbfm:  161MHCMechanical
+from lut:  162MHCMechanical
+from lut with new fbfm:  161MHCMechanical
+from lut:  163MHCMechanical
+from lut with new fbfm:  161MHCMechanical
+from lut:  165MHCMechanical
+from lut with new fbfm:  162MHCMechanical
+from lut:  181MHCMechanical
+from lut with new fbfm:  181MHCMechanical
+from lut:  182MHCMechanical
+from lut with new fbfm:  181MHCMechanical
+from lut:  183MHCMechanical
+from lut with new fbfm:  181MHCMechanical
+from lut:  184MHCMechanical
+from lut with new fbfm:  181MHCMechanical
+from lut:  185MHCMechanical
+from lut with new fbfm:  184MHCMechanical
+from lut:  186MHCMechanical
+from lut with new fbfm:  184MHCMechanical
+from lut:  187MHCMechanical
+from lut with new fbfm:  184MHCMechanical
+from lut:  188MHCMechanical
+from lut with new fbfm:  184MHCMechanical
+from lut:  189MHCMechanical
+from lut with new fbfm:  181MHCMechanical
+from lut:  91MHCPrescribed Fire
+from lut with new fbfm:  91MHCPrescribed Fire
+from lut:  98MHCPrescribed Fire
+from lut with new fbfm:  98MHCPrescribed Fire
+from lut:  101MHCPrescribed Fire
+from lut with new fbfm:  101MHCPrescribed Fire
+from lut:  102MHCPrescribed Fire
+from lut with new fbfm:  101MHCPrescribed Fire
+from lut:  103MHCPrescribed Fire
+from lut with new fbfm:  101MHCPrescribed Fire
+from lut:  121MHCPrescribed Fire
+from lut with new fbfm:  121MHCPrescribed Fire
+from lut:  141MHCPrescribed Fire
+from lut with new fbfm:  141MHCPrescribed Fire
+from lut:  142MHCPrescribed Fire
+from lut with new fbfm:  141MHCPrescribed Fire
+from lut:  144MHCPrescribed Fire
+from lut with new fbfm:  142MHCPrescribed Fire
+from lut:  145MHCPrescribed Fire
+from lut with new fbfm:  142MHCPrescribed Fire
+from lut:  161MHCPrescribed Fire
+from lut with new fbfm:  161MHCPrescribed Fire
+from lut:  162MHCPrescribed Fire
+from lut with new fbfm:  161MHCPrescribed Fire
+from lut:  165MHCPrescribed Fire
+from lut with new fbfm:  162MHCPrescribed Fire
+from lut:  181MHCPrescribed Fire
+from lut with new fbfm:  181MHCPrescribed Fire
+from lut:  183MHCPrescribed Fire
+from lut with new fbfm:  181MHCPrescribed Fire
+from lut:  184MHCPrescribed Fire
+from lut with new fbfm:  181MHCPrescribed Fire
+from lut:  188MHCPrescribed Fire
+from lut with new fbfm:  184MHCPrescribed Fire
+from lut:  91MHWManual
+from lut with new fbfm:  91MHWManual
+from lut:  98MHWManual
+from lut with new fbfm:  98MHWManual
+from lut:  101MHWManual
+from lut with new fbfm:  101MHWManual
+from lut:  102MHWManual
+from lut with new fbfm:  102MHWManual
+from lut:  103MHWManual
+from lut with new fbfm:  103MHWManual
+from lut:  122MHWManual
+from lut with new fbfm:  121MHWManual
+from lut:  141MHWManual
+from lut with new fbfm:  141MHWManual
+from lut:  142MHWManual
+from lut with new fbfm:  141MHWManual
+from lut:  144MHWManual
+from lut with new fbfm:  141MHWManual
+from lut:  145MHWManual
+from lut with new fbfm:  142MHWManual
+from lut:  161MHWManual
+from lut with new fbfm:  161MHWManual
+from lut:  162MHWManual
+from lut with new fbfm:  161MHWManual
+from lut:  165MHWManual
+from lut with new fbfm:  162MHWManual
+from lut:  181MHWManual
+from lut with new fbfm:  181MHWManual
+from lut:  182MHWManual
+from lut with new fbfm:  181MHWManual
+from lut:  183MHWManual
+from lut with new fbfm:  181MHWManual
+from lut:  184MHWManual
+from lut with new fbfm:  181MHWManual
+from lut:  186MHWManual
+from lut with new fbfm:  182MHWManual
+from lut:  187MHWManual
+from lut with new fbfm:  182MHWManual
+from lut:  188MHWManual
+from lut with new fbfm:  182MHWManual
+from lut:  189MHWManual
+from lut with new fbfm:  182MHWManual
+from lut:  91MHWMastication
+from lut with new fbfm:  91MHWMastication
+from lut:  98MHWMastication
+from lut with new fbfm:  98MHWMastication
+from lut:  99MHWMastication
+from lut with new fbfm:  99MHWMastication
+from lut:  101MHWMastication
+from lut with new fbfm:  101MHWMastication
+from lut:  102MHWMastication
+from lut with new fbfm:  102MHWMastication
+from lut:  103MHWMastication
+from lut with new fbfm:  103MHWMastication
+from lut:  121MHWMastication
+from lut with new fbfm:  121MHWMastication
+from lut:  122MHWMastication
+from lut with new fbfm:  121MHWMastication
+from lut:  141MHWMastication
+from lut with new fbfm:  141MHWMastication
+from lut:  142MHWMastication
+from lut with new fbfm:  141MHWMastication
+from lut:  144MHWMastication
+from lut with new fbfm:  141MHWMastication
+from lut:  145MHWMastication
+from lut with new fbfm:  141MHWMastication
+from lut:  163MHWMastication
+from lut with new fbfm:  161MHWMastication
+from lut:  165MHWMastication
+from lut with new fbfm:  161MHWMastication
+from lut:  181MHWMastication
+from lut with new fbfm:  182MHWMastication
+from lut:  182MHWMastication
+from lut with new fbfm:  182MHWMastication
+from lut:  183MHWMastication
+from lut with new fbfm:  182MHWMastication
+from lut:  184MHWMastication
+from lut with new fbfm:  182MHWMastication
+from lut:  186MHWMastication
+from lut with new fbfm:  182MHWMastication
+from lut:  187MHWMastication
+from lut with new fbfm:  182MHWMastication
+from lut:  188MHWMastication
+from lut with new fbfm:  182MHWMastication
+from lut:  189MHWMastication
+from lut with new fbfm:  182MHWMastication
+from lut:  91MHWMechanical
+from lut with new fbfm:  91MHWMechanical
+from lut:  98MHWMechanical
+from lut with new fbfm:  98MHWMechanical
+from lut:  99MHWMechanical
+from lut with new fbfm:  99MHWMechanical
+from lut:  101MHWMechanical
+from lut with new fbfm:  101MHWMechanical
+from lut:  102MHWMechanical
+from lut with new fbfm:  102MHWMechanical
+from lut:  103MHWMechanical
+from lut with new fbfm:  103MHWMechanical
+from lut:  121MHWMechanical
+from lut with new fbfm:  121MHWMechanical
+from lut:  122MHWMechanical
+from lut with new fbfm:  121MHWMechanical
+from lut:  141MHWMechanical
+from lut with new fbfm:  141MHWMechanical
+from lut:  142MHWMechanical
+from lut with new fbfm:  141MHWMechanical
+from lut:  144MHWMechanical
+from lut with new fbfm:  142MHWMechanical
+from lut:  145MHWMechanical
+from lut with new fbfm:  142MHWMechanical
+from lut:  161MHWMechanical
+from lut with new fbfm:  161MHWMechanical
+from lut:  162MHWMechanical
+from lut with new fbfm:  161MHWMechanical
+from lut:  163MHWMechanical
+from lut with new fbfm:  161MHWMechanical
+from lut:  165MHWMechanical
+from lut with new fbfm:  162MHWMechanical
+from lut:  181MHWMechanical
+from lut with new fbfm:  181MHWMechanical
+from lut:  182MHWMechanical
+from lut with new fbfm:  181MHWMechanical
+from lut:  183MHWMechanical
+from lut with new fbfm:  181MHWMechanical
+from lut:  184MHWMechanical
+from lut with new fbfm:  181MHWMechanical
+from lut:  186MHWMechanical
+from lut with new fbfm:  184MHWMechanical
+from lut:  187MHWMechanical
+from lut with new fbfm:  184MHWMechanical
+from lut:  188MHWMechanical
+from lut with new fbfm:  184MHWMechanical
+from lut:  189MHWMechanical
+from lut with new fbfm:  181MHWMechanical
+from lut:  165MHWPrescribed Fire
+from lut with new fbfm:  162MHWPrescribed Fire
+from lut:  91MRIManual
+from lut with new fbfm:  91MRIManual
+from lut:  98MRIManual
+from lut with new fbfm:  98MRIManual
+from lut:  99MRIManual
+from lut with new fbfm:  99MRIManual
+from lut:  102MRIManual
+from lut with new fbfm:  102MRIManual
+from lut:  103MRIManual
+from lut with new fbfm:  103MRIManual
+from lut:  121MRIManual
+from lut with new fbfm:  121MRIManual
+from lut:  122MRIManual
+from lut with new fbfm:  121MRIManual
+from lut:  141MRIManual
+from lut with new fbfm:  141MRIManual
+from lut:  142MRIManual
+from lut with new fbfm:  141MRIManual
+from lut:  145MRIManual
+from lut with new fbfm:  142MRIManual
+from lut:  161MRIManual
+from lut with new fbfm:  161MRIManual
+from lut:  162MRIManual
+from lut with new fbfm:  161MRIManual
+from lut:  165MRIManual
+from lut with new fbfm:  162MRIManual
+from lut:  181MRIManual
+from lut with new fbfm:  181MRIManual
+from lut:  182MRIManual
+from lut with new fbfm:  181MRIManual
+from lut:  183MRIManual
+from lut with new fbfm:  181MRIManual
+from lut:  184MRIManual
+from lut with new fbfm:  181MRIManual
+from lut:  187MRIManual
+from lut with new fbfm:  182MRIManual
+from lut:  188MRIManual
+from lut with new fbfm:  182MRIManual
+from lut:  91MRIMastication
+from lut with new fbfm:  91MRIMastication
+from lut:  99MRIMastication
+from lut with new fbfm:  99MRIMastication
+from lut:  101MRIMastication
+from lut with new fbfm:  101MRIMastication
+from lut:  102MRIMastication
+from lut with new fbfm:  102MRIMastication
+from lut:  103MRIMastication
+from lut with new fbfm:  103MRIMastication
+from lut:  121MRIMastication
+from lut with new fbfm:  121MRIMastication
+from lut:  122MRIMastication
+from lut with new fbfm:  122MRIMastication
+from lut:  141MRIMastication
+from lut with new fbfm:  141MRIMastication
+from lut:  142MRIMastication
+from lut with new fbfm:  142MRIMastication
+from lut:  144MRIMastication
+from lut with new fbfm:  144MRIMastication
+from lut:  145MRIMastication
+from lut with new fbfm:  145MRIMastication
+from lut:  161MRIMastication
+from lut with new fbfm:  161MRIMastication
+from lut:  162MRIMastication
+from lut with new fbfm:  162MRIMastication
+from lut:  165MRIMastication
+from lut with new fbfm:  165MRIMastication
+from lut:  181MRIMastication
+from lut with new fbfm:  181MRIMastication
+from lut:  182MRIMastication
+from lut with new fbfm:  182MRIMastication
+from lut:  183MRIMastication
+from lut with new fbfm:  183MRIMastication
+from lut:  184MRIMastication
+from lut with new fbfm:  184MRIMastication
+from lut:  187MRIMastication
+from lut with new fbfm:  187MRIMastication
+from lut:  188MRIMastication
+from lut with new fbfm:  188MRIMastication
+from lut:  91MRIMechanical
+from lut with new fbfm:  91MRIMechanical
+from lut:  93MRIMechanical
+from lut with new fbfm:  93MRIMechanical
+from lut:  98MRIMechanical
+from lut with new fbfm:  98MRIMechanical
+from lut:  101MRIMechanical
+from lut with new fbfm:  101MRIMechanical
+from lut:  102MRIMechanical
+from lut with new fbfm:  102MRIMechanical
+from lut:  121MRIMechanical
+from lut with new fbfm:  121MRIMechanical
+from lut:  122MRIMechanical
+from lut with new fbfm:  122MRIMechanical
+from lut:  142MRIMechanical
+from lut with new fbfm:  142MRIMechanical
+from lut:  144MRIMechanical
+from lut with new fbfm:  144MRIMechanical
+from lut:  145MRIMechanical
+from lut with new fbfm:  145MRIMechanical
+from lut:  161MRIMechanical
+from lut with new fbfm:  161MRIMechanical
+from lut:  162MRIMechanical
+from lut with new fbfm:  162MRIMechanical
+from lut:  165MRIMechanical
+from lut with new fbfm:  165MRIMechanical
+from lut:  181MRIMechanical
+from lut with new fbfm:  181MRIMechanical
+from lut:  182MRIMechanical
+from lut with new fbfm:  182MRIMechanical
+from lut:  183MRIMechanical
+from lut with new fbfm:  183MRIMechanical
+from lut:  184MRIMechanical
+from lut with new fbfm:  184MRIMechanical
+from lut:  185MRIMechanical
+from lut with new fbfm:  185MRIMechanical
+from lut:  187MRIMechanical
+from lut with new fbfm:  187MRIMechanical
+from lut:  188MRIMechanical
+from lut with new fbfm:  188MRIMechanical
+from lut:  98MRIPrescribed Fire
+from lut with new fbfm:  98MRIPrescribed Fire
+from lut:  101MRIPrescribed Fire
+from lut with new fbfm:  101MRIPrescribed Fire
+from lut:  102MRIPrescribed Fire
+from lut with new fbfm:  101MRIPrescribed Fire
+from lut:  121MRIPrescribed Fire
+from lut with new fbfm:  121MRIPrescribed Fire
+from lut:  122MRIPrescribed Fire
+from lut with new fbfm:  121MRIPrescribed Fire
+from lut:  142MRIPrescribed Fire
+from lut with new fbfm:  141MRIPrescribed Fire
+from lut:  144MRIPrescribed Fire
+from lut with new fbfm:  142MRIPrescribed Fire
+from lut:  161MRIPrescribed Fire
+from lut with new fbfm:  161MRIPrescribed Fire
+from lut:  165MRIPrescribed Fire
+from lut with new fbfm:  162MRIPrescribed Fire
+from lut:  181MRIPrescribed Fire
+from lut with new fbfm:  181MRIPrescribed Fire
+from lut:  182MRIPrescribed Fire
+from lut with new fbfm:  181MRIPrescribed Fire
+from lut:  183MRIPrescribed Fire
+from lut with new fbfm:  181MRIPrescribed Fire
+from lut:  184MRIPrescribed Fire
+from lut with new fbfm:  181MRIPrescribed Fire
+from lut:  187MRIPrescribed Fire
+from lut with new fbfm:  184MRIPrescribed Fire
+from lut:  188MRIPrescribed Fire
+from lut with new fbfm:  184MRIPrescribed Fire
+from lut:  91PGSManual
+from lut with new fbfm:  91PGSManual
+from lut:  98PGSManual
+from lut with new fbfm:  98PGSManual
+from lut:  99PGSManual
+from lut with new fbfm:  99PGSManual
+from lut:  101PGSManual
+from lut with new fbfm:  101PGSManual
+from lut:  102PGSManual
+from lut with new fbfm:  102PGSManual
+from lut:  103PGSManual
+from lut with new fbfm:  103PGSManual
+from lut:  121PGSManual
+from lut with new fbfm:  121PGSManual
+from lut:  122PGSManual
+from lut with new fbfm:  121PGSManual
+from lut:  141PGSManual
+from lut with new fbfm:  141PGSManual
+from lut:  142PGSManual
+from lut with new fbfm:  141PGSManual
+from lut:  144PGSManual
+from lut with new fbfm:  141PGSManual
+from lut:  145PGSManual
+from lut with new fbfm:  142PGSManual
+from lut:  161PGSManual
+from lut with new fbfm:  161PGSManual
+from lut:  162PGSManual
+from lut with new fbfm:  161PGSManual
+from lut:  165PGSManual
+from lut with new fbfm:  162PGSManual
+from lut:  181PGSManual
+from lut with new fbfm:  181PGSManual
+from lut:  182PGSManual
+from lut with new fbfm:  181PGSManual
+from lut:  183PGSManual
+from lut with new fbfm:  181PGSManual
+from lut:  184PGSManual
+from lut with new fbfm:  181PGSManual
+from lut:  186PGSManual
+from lut with new fbfm:  182PGSManual
+from lut:  187PGSManual
+from lut with new fbfm:  182PGSManual
+from lut:  188PGSManual
+from lut with new fbfm:  182PGSManual
+from lut:  91PGSMastication
+from lut with new fbfm:  91PGSMastication
+from lut:  99PGSMastication
+from lut with new fbfm:  99PGSMastication
+from lut:  101PGSMastication
+from lut with new fbfm:  101PGSMastication
+from lut:  102PGSMastication
+from lut with new fbfm:  102PGSMastication
+from lut:  103PGSMastication
+from lut with new fbfm:  103PGSMastication
+from lut:  121PGSMastication
+from lut with new fbfm:  121PGSMastication
+from lut:  122PGSMastication
+from lut with new fbfm:  121PGSMastication
+from lut:  142PGSMastication
+from lut with new fbfm:  141PGSMastication
+from lut:  144PGSMastication
+from lut with new fbfm:  141PGSMastication
+from lut:  145PGSMastication
+from lut with new fbfm:  141PGSMastication
+from lut:  162PGSMastication
+from lut with new fbfm:  161PGSMastication
+from lut:  165PGSMastication
+from lut with new fbfm:  161PGSMastication
+from lut:  181PGSMastication
+from lut with new fbfm:  182PGSMastication
+from lut:  182PGSMastication
+from lut with new fbfm:  182PGSMastication
+from lut:  183PGSMastication
+from lut with new fbfm:  182PGSMastication
+from lut:  184PGSMastication
+from lut with new fbfm:  182PGSMastication
+from lut:  186PGSMastication
+from lut with new fbfm:  182PGSMastication
+from lut:  188PGSMastication
+from lut with new fbfm:  182PGSMastication
+from lut:  101PGSMechanical
+from lut with new fbfm:  101PGSMechanical
+from lut:  102PGSMechanical
+from lut with new fbfm:  102PGSMechanical
+from lut:  103PGSMechanical
+from lut with new fbfm:  103PGSMechanical
+from lut:  121PGSMechanical
+from lut with new fbfm:  121PGSMechanical
+from lut:  122PGSMechanical
+from lut with new fbfm:  121PGSMechanical
+from lut:  141PGSMechanical
+from lut with new fbfm:  141PGSMechanical
+from lut:  142PGSMechanical
+from lut with new fbfm:  141PGSMechanical
+from lut:  144PGSMechanical
+from lut with new fbfm:  142PGSMechanical
+from lut:  145PGSMechanical
+from lut with new fbfm:  142PGSMechanical
+from lut:  161PGSMechanical
+from lut with new fbfm:  161PGSMechanical
+from lut:  162PGSMechanical
+from lut with new fbfm:  161PGSMechanical
+from lut:  165PGSMechanical
+from lut with new fbfm:  162PGSMechanical
+from lut:  181PGSMechanical
+from lut with new fbfm:  181PGSMechanical
+from lut:  183PGSMechanical
+from lut with new fbfm:  181PGSMechanical
+from lut:  184PGSMechanical
+from lut with new fbfm:  181PGSMechanical
+from lut:  185PGSMechanical
+from lut with new fbfm:  184PGSMechanical
+from lut:  186PGSMechanical
+from lut with new fbfm:  184PGSMechanical
+from lut:  187PGSMechanical
+from lut with new fbfm:  184PGSMechanical
+from lut:  188PGSMechanical
+from lut with new fbfm:  184PGSMechanical
+from lut:  99PGSPrescribed Fire
+from lut with new fbfm:  99PGSPrescribed Fire
+from lut:  101PGSPrescribed Fire
+from lut with new fbfm:  101PGSPrescribed Fire
+from lut:  121PGSPrescribed Fire
+from lut with new fbfm:  121PGSPrescribed Fire
+from lut:  122PGSPrescribed Fire
+from lut with new fbfm:  121PGSPrescribed Fire
+from lut:  144PGSPrescribed Fire
+from lut with new fbfm:  142PGSPrescribed Fire
+from lut:  161PGSPrescribed Fire
+from lut with new fbfm:  161PGSPrescribed Fire
+from lut:  165PGSPrescribed Fire
+from lut with new fbfm:  162PGSPrescribed Fire
+from lut:  181PGSPrescribed Fire
+from lut with new fbfm:  181PGSPrescribed Fire
+from lut:  182PGSPrescribed Fire
+from lut with new fbfm:  181PGSPrescribed Fire
+from lut:  184PGSPrescribed Fire
+from lut with new fbfm:  181PGSPrescribed Fire
+from lut:  187PGSPrescribed Fire
+from lut with new fbfm:  184PGSPrescribed Fire
+from lut:  91PPNManual
+from lut with new fbfm:  91PPNManual
+from lut:  98PPNManual
+from lut with new fbfm:  98PPNManual
+from lut:  101PPNManual
+from lut with new fbfm:  101PPNManual
+from lut:  102PPNManual
+from lut with new fbfm:  102PPNManual
+from lut:  103PPNManual
+from lut with new fbfm:  103PPNManual
+from lut:  121PPNManual
+from lut with new fbfm:  121PPNManual
+from lut:  122PPNManual
+from lut with new fbfm:  121PPNManual
+from lut:  141PPNManual
+from lut with new fbfm:  141PPNManual
+from lut:  142PPNManual
+from lut with new fbfm:  141PPNManual
+from lut:  144PPNManual
+from lut with new fbfm:  141PPNManual
+from lut:  145PPNManual
+from lut with new fbfm:  142PPNManual
+from lut:  161PPNManual
+from lut with new fbfm:  161PPNManual
+from lut:  162PPNManual
+from lut with new fbfm:  161PPNManual
+from lut:  165PPNManual
+from lut with new fbfm:  162PPNManual
+from lut:  181PPNManual
+from lut with new fbfm:  181PPNManual
+from lut:  182PPNManual
+from lut with new fbfm:  181PPNManual
+from lut:  183PPNManual
+from lut with new fbfm:  181PPNManual
+from lut:  184PPNManual
+from lut with new fbfm:  181PPNManual
+from lut:  185PPNManual
+from lut with new fbfm:  182PPNManual
+from lut:  186PPNManual
+from lut with new fbfm:  182PPNManual
+from lut:  187PPNManual
+from lut with new fbfm:  182PPNManual
+from lut:  188PPNManual
+from lut with new fbfm:  182PPNManual
+from lut:  189PPNManual
+from lut with new fbfm:  182PPNManual
+from lut:  91PPNMastication
+from lut with new fbfm:  91PPNMastication
+from lut:  102PPNMastication
+from lut with new fbfm:  102PPNMastication
+from lut:  122PPNMastication
+from lut with new fbfm:  121PPNMastication
+from lut:  142PPNMastication
+from lut with new fbfm:  141PPNMastication
+from lut:  144PPNMastication
+from lut with new fbfm:  141PPNMastication
+from lut:  145PPNMastication
+from lut with new fbfm:  141PPNMastication
+from lut:  162PPNMastication
+from lut with new fbfm:  161PPNMastication
+from lut:  163PPNMastication
+from lut with new fbfm:  161PPNMastication
+from lut:  165PPNMastication
+from lut with new fbfm:  161PPNMastication
+from lut:  181PPNMastication
+from lut with new fbfm:  182PPNMastication
+from lut:  183PPNMastication
+from lut with new fbfm:  182PPNMastication
+from lut:  184PPNMastication
+from lut with new fbfm:  182PPNMastication
+from lut:  185PPNMastication
+from lut with new fbfm:  182PPNMastication
+from lut:  186PPNMastication
+from lut with new fbfm:  182PPNMastication
+from lut:  187PPNMastication
+from lut with new fbfm:  182PPNMastication
+from lut:  188PPNMastication
+from lut with new fbfm:  182PPNMastication
+from lut:  189PPNMastication
+from lut with new fbfm:  182PPNMastication
+from lut:  91PPNMechanical
+from lut with new fbfm:  91PPNMechanical
+from lut:  98PPNMechanical
+from lut with new fbfm:  98PPNMechanical
+from lut:  99PPNMechanical
+from lut with new fbfm:  99PPNMechanical
+from lut:  101PPNMechanical
+from lut with new fbfm:  101PPNMechanical
+from lut:  102PPNMechanical
+from lut with new fbfm:  102PPNMechanical
+from lut:  103PPNMechanical
+from lut with new fbfm:  103PPNMechanical
+from lut:  121PPNMechanical
+from lut with new fbfm:  121PPNMechanical
+from lut:  122PPNMechanical
+from lut with new fbfm:  121PPNMechanical
+from lut:  141PPNMechanical
+from lut with new fbfm:  141PPNMechanical
+from lut:  142PPNMechanical
+from lut with new fbfm:  141PPNMechanical
+from lut:  144PPNMechanical
+from lut with new fbfm:  142PPNMechanical
+from lut:  145PPNMechanical
+from lut with new fbfm:  142PPNMechanical
+from lut:  161PPNMechanical
+from lut with new fbfm:  161PPNMechanical
+from lut:  162PPNMechanical
+from lut with new fbfm:  161PPNMechanical
+from lut:  163PPNMechanical
+from lut with new fbfm:  161PPNMechanical
+from lut:  165PPNMechanical
+from lut with new fbfm:  162PPNMechanical
+from lut:  181PPNMechanical
+from lut with new fbfm:  181PPNMechanical
+from lut:  182PPNMechanical
+from lut with new fbfm:  181PPNMechanical
+from lut:  183PPNMechanical
+from lut with new fbfm:  181PPNMechanical
+from lut:  184PPNMechanical
+from lut with new fbfm:  181PPNMechanical
+from lut:  185PPNMechanical
+from lut with new fbfm:  184PPNMechanical
+from lut:  186PPNMechanical
+from lut with new fbfm:  184PPNMechanical
+from lut:  187PPNMechanical
+from lut with new fbfm:  184PPNMechanical
+from lut:  188PPNMechanical
+from lut with new fbfm:  184PPNMechanical
+from lut:  189PPNMechanical
+from lut with new fbfm:  181PPNMechanical
+from lut:  142PPNPrescribed Fire
+from lut with new fbfm:  141PPNPrescribed Fire
+from lut:  161PPNPrescribed Fire
+from lut with new fbfm:  161PPNPrescribed Fire
+from lut:  162PPNPrescribed Fire
+from lut with new fbfm:  161PPNPrescribed Fire
+from lut:  165PPNPrescribed Fire
+from lut with new fbfm:  162PPNPrescribed Fire
+from lut:  183PPNPrescribed Fire
+from lut with new fbfm:  181PPNPrescribed Fire
+from lut:  188PPNPrescribed Fire
+from lut with new fbfm:  184PPNPrescribed Fire
+from lut:  91RFRManual
+from lut with new fbfm:  91RFRManual
+from lut:  99RFRManual
+from lut with new fbfm:  99RFRManual
+from lut:  101RFRManual
+from lut with new fbfm:  101RFRManual
+from lut:  102RFRManual
+from lut with new fbfm:  102RFRManual
+from lut:  121RFRManual
+from lut with new fbfm:  121RFRManual
+from lut:  122RFRManual
+from lut with new fbfm:  121RFRManual
+from lut:  141RFRManual
+from lut with new fbfm:  141RFRManual
+from lut:  142RFRManual
+from lut with new fbfm:  141RFRManual
+from lut:  144RFRManual
+from lut with new fbfm:  141RFRManual
+from lut:  161RFRManual
+from lut with new fbfm:  161RFRManual
+from lut:  165RFRManual
+from lut with new fbfm:  162RFRManual
+from lut:  181RFRManual
+from lut with new fbfm:  181RFRManual
+from lut:  182RFRManual
+from lut with new fbfm:  181RFRManual
+from lut:  183RFRManual
+from lut with new fbfm:  181RFRManual
+from lut:  184RFRManual
+from lut with new fbfm:  181RFRManual
+from lut:  187RFRManual
+from lut with new fbfm:  182RFRManual
+from lut:  188RFRManual
+from lut with new fbfm:  182RFRManual
+from lut:  122RFRMastication
+from lut with new fbfm:  121RFRMastication
+from lut:  144RFRMastication
+from lut with new fbfm:  141RFRMastication
+from lut:  181RFRMastication
+from lut with new fbfm:  182RFRMastication
+from lut:  184RFRMastication
+from lut with new fbfm:  182RFRMastication
+from lut:  91RFRMechanical
+from lut with new fbfm:  91RFRMechanical
+from lut:  99RFRMechanical
+from lut with new fbfm:  99RFRMechanical
+from lut:  101RFRMechanical
+from lut with new fbfm:  101RFRMechanical
+from lut:  102RFRMechanical
+from lut with new fbfm:  102RFRMechanical
+from lut:  121RFRMechanical
+from lut with new fbfm:  121RFRMechanical
+from lut:  122RFRMechanical
+from lut with new fbfm:  121RFRMechanical
+from lut:  141RFRMechanical
+from lut with new fbfm:  141RFRMechanical
+from lut:  142RFRMechanical
+from lut with new fbfm:  141RFRMechanical
+from lut:  144RFRMechanical
+from lut with new fbfm:  142RFRMechanical
+from lut:  161RFRMechanical
+from lut with new fbfm:  161RFRMechanical
+from lut:  162RFRMechanical
+from lut with new fbfm:  161RFRMechanical
+from lut:  165RFRMechanical
+from lut with new fbfm:  162RFRMechanical
+from lut:  181RFRMechanical
+from lut with new fbfm:  181RFRMechanical
+from lut:  182RFRMechanical
+from lut with new fbfm:  181RFRMechanical
+from lut:  183RFRMechanical
+from lut with new fbfm:  181RFRMechanical
+from lut:  184RFRMechanical
+from lut with new fbfm:  181RFRMechanical
+from lut:  186RFRMechanical
+from lut with new fbfm:  184RFRMechanical
+from lut:  187RFRMechanical
+from lut with new fbfm:  184RFRMechanical
+from lut:  188RFRMechanical
+from lut with new fbfm:  184RFRMechanical
+from lut:  99RFRPrescribed Fire
+from lut with new fbfm:  99RFRPrescribed Fire
+from lut:  101RFRPrescribed Fire
+from lut with new fbfm:  101RFRPrescribed Fire
+from lut:  121RFRPrescribed Fire
+from lut with new fbfm:  121RFRPrescribed Fire
+from lut:  122RFRPrescribed Fire
+from lut with new fbfm:  121RFRPrescribed Fire
+from lut:  141RFRPrescribed Fire
+from lut with new fbfm:  141RFRPrescribed Fire
+from lut:  144RFRPrescribed Fire
+from lut with new fbfm:  142RFRPrescribed Fire
+from lut:  161RFRPrescribed Fire
+from lut with new fbfm:  161RFRPrescribed Fire
+from lut:  165RFRPrescribed Fire
+from lut with new fbfm:  162RFRPrescribed Fire
+from lut:  181RFRPrescribed Fire
+from lut with new fbfm:  181RFRPrescribed Fire
+from lut:  182RFRPrescribed Fire
+from lut with new fbfm:  181RFRPrescribed Fire
+from lut:  183RFRPrescribed Fire
+from lut with new fbfm:  181RFRPrescribed Fire
+from lut:  184RFRPrescribed Fire
+from lut with new fbfm:  181RFRPrescribed Fire
+from lut:  187RFRPrescribed Fire
+from lut with new fbfm:  184RFRPrescribed Fire
+from lut:  98RIVManual
+from lut with new fbfm:  98RIVManual
+from lut:  122RIVManual
+from lut with new fbfm:  121RIVManual
+from lut:  145RIVManual
+from lut with new fbfm:  142RIVManual
+from lut:  165RIVManual
+from lut with new fbfm:  162RIVManual
+from lut:  181RIVManual
+from lut with new fbfm:  181RIVManual
+from lut:  183RIVManual
+from lut with new fbfm:  181RIVManual
+from lut:  122SCNManual
+from lut with new fbfm:  121SCNManual
+from lut:  161SCNManual
+from lut with new fbfm:  161SCNManual
+from lut:  184SCNManual
+from lut with new fbfm:  182SCNManual
+from lut:  187SCNManual
+from lut with new fbfm:  182SCNManual
+from lut:  122SCNPrescribed Fire
+from lut with new fbfm:  121SCNPrescribed Fire
+from lut:  144SCNPrescribed Fire
+from lut with new fbfm:  142SCNPrescribed Fire
+from lut:  161SCNPrescribed Fire
+from lut with new fbfm:  161SCNPrescribed Fire
+from lut:  184SCNPrescribed Fire
+from lut with new fbfm:  181SCNPrescribed Fire
+from lut:  187SCNPrescribed Fire
+from lut with new fbfm:  184SCNPrescribed Fire
+from lut:  91SGBManual
+from lut with new fbfm:  91SGBManual
+from lut:  101SGBManual
+from lut with new fbfm:  101SGBManual
+from lut:  102SGBManual
+from lut with new fbfm:  102SGBManual
+from lut:  121SGBManual
+from lut with new fbfm:  121SGBManual
+from lut:  122SGBManual
+from lut with new fbfm:  121SGBManual
+from lut:  144SGBManual
+from lut with new fbfm:  141SGBManual
+from lut:  165SGBManual
+from lut with new fbfm:  162SGBManual
+from lut:  181SGBManual
+from lut with new fbfm:  181SGBManual
+from lut:  91SGBMastication
+from lut with new fbfm:  91SGBMastication
+from lut:  98SGBMastication
+from lut with new fbfm:  98SGBMastication
+from lut:  99SGBMastication
+from lut with new fbfm:  99SGBMastication
+from lut:  102SGBMastication
+from lut with new fbfm:  102SGBMastication
+from lut:  103SGBMastication
+from lut with new fbfm:  103SGBMastication
+from lut:  121SGBMastication
+from lut with new fbfm:  121SGBMastication
+from lut:  122SGBMastication
+from lut with new fbfm:  121SGBMastication
+from lut:  142SGBMastication
+from lut with new fbfm:  141SGBMastication
+from lut:  144SGBMastication
+from lut with new fbfm:  141SGBMastication
+from lut:  145SGBMastication
+from lut with new fbfm:  141SGBMastication
+from lut:  161SGBMastication
+from lut with new fbfm:  161SGBMastication
+from lut:  162SGBMastication
+from lut with new fbfm:  161SGBMastication
+from lut:  165SGBMastication
+from lut with new fbfm:  161SGBMastication
+from lut:  181SGBMastication
+from lut with new fbfm:  182SGBMastication
+from lut:  182SGBMastication
+from lut with new fbfm:  182SGBMastication
+from lut:  183SGBMastication
+from lut with new fbfm:  182SGBMastication
+from lut:  184SGBMastication
+from lut with new fbfm:  182SGBMastication
+from lut:  185SGBMastication
+from lut with new fbfm:  182SGBMastication
+from lut:  186SGBMastication
+from lut with new fbfm:  182SGBMastication
+from lut:  187SGBMastication
+from lut with new fbfm:  182SGBMastication
+from lut:  91SGBMechanical
+from lut with new fbfm:  91SGBMechanical
+from lut:  93SGBMechanical
+from lut with new fbfm:  93SGBMechanical
+from lut:  98SGBMechanical
+from lut with new fbfm:  98SGBMechanical
+from lut:  101SGBMechanical
+from lut with new fbfm:  101SGBMechanical
+from lut:  102SGBMechanical
+from lut with new fbfm:  102SGBMechanical
+from lut:  103SGBMechanical
+from lut with new fbfm:  103SGBMechanical
+from lut:  121SGBMechanical
+from lut with new fbfm:  121SGBMechanical
+from lut:  122SGBMechanical
+from lut with new fbfm:  121SGBMechanical
+from lut:  141SGBMechanical
+from lut with new fbfm:  141SGBMechanical
+from lut:  142SGBMechanical
+from lut with new fbfm:  141SGBMechanical
+from lut:  144SGBMechanical
+from lut with new fbfm:  142SGBMechanical
+from lut:  145SGBMechanical
+from lut with new fbfm:  142SGBMechanical
+from lut:  147SGBMechanical
+from lut with new fbfm:  142SGBMechanical
+from lut:  161SGBMechanical
+from lut with new fbfm:  161SGBMechanical
+from lut:  162SGBMechanical
+from lut with new fbfm:  161SGBMechanical
+from lut:  165SGBMechanical
+from lut with new fbfm:  162SGBMechanical
+from lut:  181SGBMechanical
+from lut with new fbfm:  181SGBMechanical
+from lut:  182SGBMechanical
+from lut with new fbfm:  181SGBMechanical
+from lut:  183SGBMechanical
+from lut with new fbfm:  181SGBMechanical
+from lut:  184SGBMechanical
+from lut with new fbfm:  181SGBMechanical
+from lut:  185SGBMechanical
+from lut with new fbfm:  184SGBMechanical
+from lut:  186SGBMechanical
+from lut with new fbfm:  184SGBMechanical
+from lut:  91SMCManual
+from lut with new fbfm:  91SMCManual
+from lut:  98SMCManual
+from lut with new fbfm:  98SMCManual
+from lut:  99SMCManual
+from lut with new fbfm:  99SMCManual
+from lut:  101SMCManual
+from lut with new fbfm:  101SMCManual
+from lut:  102SMCManual
+from lut with new fbfm:  102SMCManual
+from lut:  103SMCManual
+from lut with new fbfm:  103SMCManual
+from lut:  121SMCManual
+from lut with new fbfm:  121SMCManual
+from lut:  122SMCManual
+from lut with new fbfm:  121SMCManual
+from lut:  141SMCManual
+from lut with new fbfm:  141SMCManual
+from lut:  142SMCManual
+from lut with new fbfm:  141SMCManual
+from lut:  144SMCManual
+from lut with new fbfm:  141SMCManual
+from lut:  145SMCManual
+from lut with new fbfm:  142SMCManual
+from lut:  161SMCManual
+from lut with new fbfm:  161SMCManual
+from lut:  162SMCManual
+from lut with new fbfm:  161SMCManual
+from lut:  165SMCManual
+from lut with new fbfm:  162SMCManual
+from lut:  181SMCManual
+from lut with new fbfm:  181SMCManual
+from lut:  182SMCManual
+from lut with new fbfm:  181SMCManual
+from lut:  183SMCManual
+from lut with new fbfm:  181SMCManual
+from lut:  184SMCManual
+from lut with new fbfm:  181SMCManual
+from lut:  185SMCManual
+from lut with new fbfm:  182SMCManual
+from lut:  186SMCManual
+from lut with new fbfm:  182SMCManual
+from lut:  187SMCManual
+from lut with new fbfm:  182SMCManual
+from lut:  188SMCManual
+from lut with new fbfm:  182SMCManual
+from lut:  189SMCManual
+from lut with new fbfm:  182SMCManual
+from lut:  91SMCMastication
+from lut with new fbfm:  91SMCMastication
+from lut:  98SMCMastication
+from lut with new fbfm:  98SMCMastication
+from lut:  102SMCMastication
+from lut with new fbfm:  102SMCMastication
+from lut:  121SMCMastication
+from lut with new fbfm:  121SMCMastication
+from lut:  122SMCMastication
+from lut with new fbfm:  121SMCMastication
+from lut:  142SMCMastication
+from lut with new fbfm:  141SMCMastication
+from lut:  144SMCMastication
+from lut with new fbfm:  141SMCMastication
+from lut:  145SMCMastication
+from lut with new fbfm:  141SMCMastication
+from lut:  161SMCMastication
+from lut with new fbfm:  161SMCMastication
+from lut:  162SMCMastication
+from lut with new fbfm:  161SMCMastication
+from lut:  165SMCMastication
+from lut with new fbfm:  161SMCMastication
+from lut:  181SMCMastication
+from lut with new fbfm:  182SMCMastication
+from lut:  182SMCMastication
+from lut with new fbfm:  182SMCMastication
+from lut:  183SMCMastication
+from lut with new fbfm:  182SMCMastication
+from lut:  184SMCMastication
+from lut with new fbfm:  182SMCMastication
+from lut:  185SMCMastication
+from lut with new fbfm:  182SMCMastication
+from lut:  186SMCMastication
+from lut with new fbfm:  182SMCMastication
+from lut:  187SMCMastication
+from lut with new fbfm:  182SMCMastication
+from lut:  188SMCMastication
+from lut with new fbfm:  182SMCMastication
+from lut:  189SMCMastication
+from lut with new fbfm:  182SMCMastication
+from lut:  91SMCMechanical
+from lut with new fbfm:  91SMCMechanical
+from lut:  98SMCMechanical
+from lut with new fbfm:  98SMCMechanical
+from lut:  99SMCMechanical
+from lut with new fbfm:  99SMCMechanical
+from lut:  101SMCMechanical
+from lut with new fbfm:  101SMCMechanical
+from lut:  102SMCMechanical
+from lut with new fbfm:  102SMCMechanical
+from lut:  103SMCMechanical
+from lut with new fbfm:  103SMCMechanical
+from lut:  121SMCMechanical
+from lut with new fbfm:  121SMCMechanical
+from lut:  122SMCMechanical
+from lut with new fbfm:  121SMCMechanical
+from lut:  141SMCMechanical
+from lut with new fbfm:  141SMCMechanical
+from lut:  142SMCMechanical
+from lut with new fbfm:  141SMCMechanical
+from lut:  144SMCMechanical
+from lut with new fbfm:  142SMCMechanical
+from lut:  145SMCMechanical
+from lut with new fbfm:  142SMCMechanical
+from lut:  161SMCMechanical
+from lut with new fbfm:  161SMCMechanical
+from lut:  162SMCMechanical
+from lut with new fbfm:  161SMCMechanical
+from lut:  165SMCMechanical
+from lut with new fbfm:  162SMCMechanical
+from lut:  181SMCMechanical
+from lut with new fbfm:  181SMCMechanical
+from lut:  182SMCMechanical
+from lut with new fbfm:  181SMCMechanical
+from lut:  183SMCMechanical
+from lut with new fbfm:  181SMCMechanical
+from lut:  184SMCMechanical
+from lut with new fbfm:  181SMCMechanical
+from lut:  185SMCMechanical
+from lut with new fbfm:  184SMCMechanical
+from lut:  186SMCMechanical
+from lut with new fbfm:  184SMCMechanical
+from lut:  187SMCMechanical
+from lut with new fbfm:  184SMCMechanical
+from lut:  188SMCMechanical
+from lut with new fbfm:  184SMCMechanical
+from lut:  189SMCMechanical
+from lut with new fbfm:  181SMCMechanical
+from lut:  202SMCMechanical
+from lut with new fbfm:  181SMCMechanical
+from lut:  91SMCPrescribed Fire
+from lut with new fbfm:  91SMCPrescribed Fire
+from lut:  98SMCPrescribed Fire
+from lut with new fbfm:  98SMCPrescribed Fire
+from lut:  101SMCPrescribed Fire
+from lut with new fbfm:  101SMCPrescribed Fire
+from lut:  102SMCPrescribed Fire
+from lut with new fbfm:  101SMCPrescribed Fire
+from lut:  103SMCPrescribed Fire
+from lut with new fbfm:  101SMCPrescribed Fire
+from lut:  121SMCPrescribed Fire
+from lut with new fbfm:  121SMCPrescribed Fire
+from lut:  122SMCPrescribed Fire
+from lut with new fbfm:  121SMCPrescribed Fire
+from lut:  141SMCPrescribed Fire
+from lut with new fbfm:  141SMCPrescribed Fire
+from lut:  142SMCPrescribed Fire
+from lut with new fbfm:  141SMCPrescribed Fire
+from lut:  144SMCPrescribed Fire
+from lut with new fbfm:  142SMCPrescribed Fire
+from lut:  145SMCPrescribed Fire
+from lut with new fbfm:  142SMCPrescribed Fire
+from lut:  161SMCPrescribed Fire
+from lut with new fbfm:  161SMCPrescribed Fire
+from lut:  162SMCPrescribed Fire
+from lut with new fbfm:  161SMCPrescribed Fire
+from lut:  165SMCPrescribed Fire
+from lut with new fbfm:  162SMCPrescribed Fire
+from lut:  181SMCPrescribed Fire
+from lut with new fbfm:  181SMCPrescribed Fire
+from lut:  182SMCPrescribed Fire
+from lut with new fbfm:  181SMCPrescribed Fire
+from lut:  183SMCPrescribed Fire
+from lut with new fbfm:  181SMCPrescribed Fire
+from lut:  184SMCPrescribed Fire
+from lut with new fbfm:  181SMCPrescribed Fire
+from lut:  186SMCPrescribed Fire
+from lut with new fbfm:  184SMCPrescribed Fire
+from lut:  187SMCPrescribed Fire
+from lut with new fbfm:  184SMCPrescribed Fire
+from lut:  188SMCPrescribed Fire
+from lut with new fbfm:  184SMCPrescribed Fire
+from lut:  189SMCPrescribed Fire
+from lut with new fbfm:  181SMCPrescribed Fire
+from lut:  91URBManual
+from lut with new fbfm:  91URBManual
+from lut:  98URBManual
+from lut with new fbfm:  98URBManual
+from lut:  102URBManual
+from lut with new fbfm:  102URBManual
+from lut:  121URBManual
+from lut with new fbfm:  121URBManual
+from lut:  122URBManual
+from lut with new fbfm:  121URBManual
+from lut:  142URBManual
+from lut with new fbfm:  141URBManual
+from lut:  144URBManual
+from lut with new fbfm:  141URBManual
+from lut:  145URBManual
+from lut with new fbfm:  142URBManual
+from lut:  162URBManual
+from lut with new fbfm:  161URBManual
+from lut:  165URBManual
+from lut with new fbfm:  162URBManual
+from lut:  181URBManual
+from lut with new fbfm:  181URBManual
+from lut:  182URBManual
+from lut with new fbfm:  181URBManual
+from lut:  183URBManual
+from lut with new fbfm:  181URBManual
+from lut:  184URBManual
+from lut with new fbfm:  181URBManual
+from lut:  185URBManual
+from lut with new fbfm:  182URBManual
+from lut:  186URBManual
+from lut with new fbfm:  182URBManual
+from lut:  188URBManual
+from lut with new fbfm:  182URBManual
+from lut:  189URBManual
+from lut with new fbfm:  182URBManual
+from lut:  91WFRManual
+from lut with new fbfm:  91WFRManual
+from lut:  98WFRManual
+from lut with new fbfm:  98WFRManual
+from lut:  99WFRManual
+from lut with new fbfm:  99WFRManual
+from lut:  101WFRManual
+from lut with new fbfm:  101WFRManual
+from lut:  102WFRManual
+from lut with new fbfm:  102WFRManual
+from lut:  121WFRManual
+from lut with new fbfm:  121WFRManual
+from lut:  122WFRManual
+from lut with new fbfm:  121WFRManual
+from lut:  141WFRManual
+from lut with new fbfm:  141WFRManual
+from lut:  142WFRManual
+from lut with new fbfm:  141WFRManual
+from lut:  144WFRManual
+from lut with new fbfm:  141WFRManual
+from lut:  145WFRManual
+from lut with new fbfm:  142WFRManual
+from lut:  161WFRManual
+from lut with new fbfm:  161WFRManual
+from lut:  162WFRManual
+from lut with new fbfm:  161WFRManual
+from lut:  165WFRManual
+from lut with new fbfm:  162WFRManual
+from lut:  181WFRManual
+from lut with new fbfm:  181WFRManual
+from lut:  182WFRManual
+from lut with new fbfm:  181WFRManual
+from lut:  183WFRManual
+from lut with new fbfm:  181WFRManual
+from lut:  184WFRManual
+from lut with new fbfm:  181WFRManual
+from lut:  185WFRManual
+from lut with new fbfm:  182WFRManual
+from lut:  186WFRManual
+from lut with new fbfm:  182WFRManual
+from lut:  187WFRManual
+from lut with new fbfm:  182WFRManual
+from lut:  188WFRManual
+from lut with new fbfm:  182WFRManual
+from lut:  189WFRManual
+from lut with new fbfm:  182WFRManual
+from lut:  102WFRMastication
+from lut with new fbfm:  102WFRMastication
+from lut:  122WFRMastication
+from lut with new fbfm:  121WFRMastication
+from lut:  142WFRMastication
+from lut with new fbfm:  141WFRMastication
+from lut:  144WFRMastication
+from lut with new fbfm:  141WFRMastication
+from lut:  161WFRMastication
+from lut with new fbfm:  161WFRMastication
+from lut:  165WFRMastication
+from lut with new fbfm:  161WFRMastication
+from lut:  181WFRMastication
+from lut with new fbfm:  182WFRMastication
+from lut:  182WFRMastication
+from lut with new fbfm:  182WFRMastication
+from lut:  183WFRMastication
+from lut with new fbfm:  182WFRMastication
+from lut:  184WFRMastication
+from lut with new fbfm:  182WFRMastication
+from lut:  186WFRMastication
+from lut with new fbfm:  182WFRMastication
+from lut:  187WFRMastication
+from lut with new fbfm:  182WFRMastication
+from lut:  91WFRMechanical
+from lut with new fbfm:  91WFRMechanical
+from lut:  98WFRMechanical
+from lut with new fbfm:  98WFRMechanical
+from lut:  99WFRMechanical
+from lut with new fbfm:  99WFRMechanical
+from lut:  101WFRMechanical
+from lut with new fbfm:  101WFRMechanical
+from lut:  102WFRMechanical
+from lut with new fbfm:  102WFRMechanical
+from lut:  103WFRMechanical
+from lut with new fbfm:  103WFRMechanical
+from lut:  121WFRMechanical
+from lut with new fbfm:  121WFRMechanical
+from lut:  122WFRMechanical
+from lut with new fbfm:  121WFRMechanical
+from lut:  141WFRMechanical
+from lut with new fbfm:  141WFRMechanical
+from lut:  142WFRMechanical
+from lut with new fbfm:  141WFRMechanical
+from lut:  143WFRMechanical
+from lut with new fbfm:  141WFRMechanical
+from lut:  144WFRMechanical
+from lut with new fbfm:  142WFRMechanical
+from lut:  145WFRMechanical
+from lut with new fbfm:  142WFRMechanical
+from lut:  147WFRMechanical
+from lut with new fbfm:  142WFRMechanical
+from lut:  161WFRMechanical
+from lut with new fbfm:  161WFRMechanical
+from lut:  162WFRMechanical
+from lut with new fbfm:  161WFRMechanical
+from lut:  165WFRMechanical
+from lut with new fbfm:  162WFRMechanical
+from lut:  181WFRMechanical
+from lut with new fbfm:  181WFRMechanical
+from lut:  182WFRMechanical
+from lut with new fbfm:  181WFRMechanical
+from lut:  183WFRMechanical
+from lut with new fbfm:  181WFRMechanical
+from lut:  184WFRMechanical
+from lut with new fbfm:  181WFRMechanical
+from lut:  185WFRMechanical
+from lut with new fbfm:  184WFRMechanical
+from lut:  186WFRMechanical
+from lut with new fbfm:  184WFRMechanical
+from lut:  187WFRMechanical
+from lut with new fbfm:  184WFRMechanical
+from lut:  188WFRMechanical
+from lut with new fbfm:  184WFRMechanical
+from lut:  189WFRMechanical
+from lut with new fbfm:  181WFRMechanical
+from lut:  102WFRPrescribed Fire
+from lut with new fbfm:  101WFRPrescribed Fire
+from lut:  122WFRPrescribed Fire
+from lut with new fbfm:  121WFRPrescribed Fire
+from lut:  142WFRPrescribed Fire
+from lut with new fbfm:  141WFRPrescribed Fire
+from lut:  144WFRPrescribed Fire
+from lut with new fbfm:  142WFRPrescribed Fire
+from lut:  161WFRPrescribed Fire
+from lut with new fbfm:  161WFRPrescribed Fire
+from lut:  165WFRPrescribed Fire
+from lut with new fbfm:  162WFRPrescribed Fire
+from lut:  181WFRPrescribed Fire
+from lut with new fbfm:  181WFRPrescribed Fire
+from lut:  182WFRPrescribed Fire
+from lut with new fbfm:  181WFRPrescribed Fire
+from lut:  183WFRPrescribed Fire
+from lut with new fbfm:  181WFRPrescribed Fire
+from lut:  184WFRPrescribed Fire
+from lut with new fbfm:  181WFRPrescribed Fire
+from lut:  187WFRPrescribed Fire
+from lut with new fbfm:  184WFRPrescribed Fire
+from lut:  188WFRPrescribed Fire
+from lut with new fbfm:  184WFRPrescribed Fire
+from lut:  91WTMManual
+from lut with new fbfm:  91WTMManual
+from lut:  98WTMManual
+from lut with new fbfm:  98WTMManual
+from lut:  101WTMManual
+from lut with new fbfm:  101WTMManual
+from lut:  102WTMManual
+from lut with new fbfm:  102WTMManual
+from lut:  122WTMManual
+from lut with new fbfm:  121WTMManual
+from lut:  142WTMManual
+from lut with new fbfm:  141WTMManual
+from lut:  144WTMManual
+from lut with new fbfm:  141WTMManual
+from lut:  161WTMManual
+from lut with new fbfm:  161WTMManual
+from lut:  165WTMManual
+from lut with new fbfm:  162WTMManual
+from lut:  183WTMManual
+from lut with new fbfm:  181WTMManual
+from lut:  184WTMManual
+from lut with new fbfm:  182WTMManual
+from lut:  187WTMManual
+from lut with new fbfm:  182WTMManual
+from lut:  91WTMMastication
+from lut with new fbfm:  91WTMMastication
+from lut:  98WTMMastication
+from lut with new fbfm:  98WTMMastication
+from lut:  101WTMMastication
+from lut with new fbfm:  101WTMMastication
+from lut:  102WTMMastication
+from lut with new fbfm:  102WTMMastication
+from lut:  121WTMMastication
+from lut with new fbfm:  121WTMMastication
+from lut:  122WTMMastication
+from lut with new fbfm:  122WTMMastication
+from lut:  142WTMMastication
+from lut with new fbfm:  142WTMMastication
+from lut:  144WTMMastication
+from lut with new fbfm:  144WTMMastication
+from lut:  162WTMMastication
+from lut with new fbfm:  162WTMMastication
+from lut:  165WTMMastication
+from lut with new fbfm:  165WTMMastication
+from lut:  182WTMMastication
+from lut with new fbfm:  182WTMMastication
+from lut:  183WTMMastication
+from lut with new fbfm:  183WTMMastication
+from lut:  184WTMMastication
+from lut with new fbfm:  184WTMMastication
+from lut:  188WTMMastication
+from lut with new fbfm:  188WTMMastication
+from lut:  101WTMMechanical
+from lut with new fbfm:  101WTMMechanical
+from lut:  102WTMMechanical
+from lut with new fbfm:  102WTMMechanical
+from lut:  121WTMMechanical
+from lut with new fbfm:  121WTMMechanical
+from lut:  122WTMMechanical
+from lut with new fbfm:  122WTMMechanical
+from lut:  144WTMMechanical
+from lut with new fbfm:  144WTMMechanical
+from lut:  145WTMMechanical
+from lut with new fbfm:  145WTMMechanical
+from lut:  165WTMMechanical
+from lut with new fbfm:  165WTMMechanical
+from lut:  183WTMMechanical
+from lut with new fbfm:  183WTMMechanical
+from lut:  184WTMMechanical
+from lut with new fbfm:  184WTMMechanical
+from lut:  101WTMPrescribed Fire
+from lut with new fbfm:  101WTMPrescribed Fire
+from lut:  121WTMPrescribed Fire
+from lut with new fbfm:  121WTMPrescribed Fire
+from lut:  122WTMPrescribed Fire
+from lut with new fbfm:  121WTMPrescribed Fire
+from lut:  144WTMPrescribed Fire
+from lut with new fbfm:  142WTMPrescribed Fire
+from lut:  161WTMPrescribed Fire
+from lut with new fbfm:  161WTMPrescribed Fire
+from lut:  165WTMPrescribed Fire
+from lut with new fbfm:  162WTMPrescribed Fire
+from lut:  182WTMPrescribed Fire
+from lut with new fbfm:  181WTMPrescribed Fire
+from lut:  183WTMPrescribed Fire
+from lut with new fbfm:  181WTMPrescribed Fire
+from lut:  184WTMPrescribed Fire
+from lut with new fbfm:  181WTMPrescribed Fire
+from lut:  187WTMPrescribed Fire
+from lut with new fbfm:  184WTMPrescribed Fire
+was combined_text_a_copy modified? False
+unique text combinations with counts:  [['101AGSManual' '7']
+ ['101AGSMechanical' '123']
+ ['101BARNone' '117']
+ ...
+ ['99SMCNone' '3']
+ ['99WFRManual' '3']
+ ['99WFRMechanical' '13']]
+number of unique text combinations:  819
+unique combinations of pre_fm_a with counts:  [[      91   116550]
+ [      93    64339]
+ [      98   296487]
+ [      99 10912521]
+ [     101   414279]
+ [     102   512296]
+ [     103    81923]
+ [     121   315800]
+ [     122   818039]
+ [     123        1]
+ [     141   322120]
+ [     142   530092]
+ [     143    23238]
+ [     144   477875]
+ [     145    80324]
+ [     147     3355]
+ [     161  1433679]
+ [     162   198215]
+ [     163    15529]
+ [     165  3327234]
+ [     181   544200]
+ [     182   281384]
+ [     183   391835]
+ [     184   254524]
+ [     185    20264]
+ [     186    68724]
+ [     187    76935]
+ [     188   514179]
+ [     189    19256]
+ [     202       43]]
+unique combinations of post_fm_a with counts:  [['101' '414279']
+ ['102' '512296']
+ ['103' '81923']
+ ['121' '342544']
+ ['122' '791295']
+ ['123' '1']
+ ['141' '372717']
+ ['142' '515721']
+ ['143' '23235']
+ ['144' '449353']
+ ['145' '72653']
+ ['147' '3325']
+ ['161' '1438917']
+ ['162' '768505']
+ ['163' '15445']
+ ['165' '2751790']
+ ['181' '621997']
+ ['182' '281074']
+ ['183' '363336']
+ ['184' '286704']
+ ['185' '17150']
+ ['186' '65408']
+ ['187' '61947']
+ ['188' '456075']
+ ['189' '17611']
+ ['202' '42']
+ ['91' '116550']
+ ['93' '64339']
+ ['98' '296487']
+ ['99' '10912521']]
+almost finished
+before raster write
+finished
+#+end_example
