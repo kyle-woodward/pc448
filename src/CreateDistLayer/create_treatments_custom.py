@@ -68,16 +68,30 @@ def make_full_dist_shp(files:list, local_treatments_dir:str, local_zones_file:st
         # do the necessary wrangling and year filtering after joining to treatments lookup
         shp = gpd.read_file(file_pth)
         logger.info(f'total records in input shp: {shp.shape[0]}')
-        shp = shp.merge(lookup_table, how='inner', left_on='TREATMENT', right_on='TREATMENT')
         
+        # schema check
+        required_cols = ['TREATMENT','YEAR']
+        assert all([col in shp.columns for col in required_cols]), f"missing required columns in {file_pth}. Required columns: {required_cols}"
+        
+        # try to convert YEAR to int, if it fails, then it's not a valid year value
+        try:
+            shp['YEAR'] = shp['YEAR'].astype(int)
+        except TypeError:
+            raise TypeError(f"Could not convert YEAR column in {file_pth}, contains invalid values")
+        
+        # filter for year range
+        shp = shp[(shp['YEAR'] >= year_range[0]) & (shp['YEAR'] <= year_range[1])]
+        if shp.shape[0] == 0:
+            raise RuntimeError(f'No records in {file_pth} after filtering by year range')
+
+        # inner join with lookup table google sheet to get TYPE_SEV values
+        shp = shp.merge(lookup_table, how='inner', left_on='TREATMENT', right_on='TREATMENT')
         shp.loc[:,'TYPE_SEV'] = shp['TYPE_SEV'].astype(int) 
         # filter to remove invalid TYPE_SEV values that would be over 100 
         # (TYPE_SEV =  TYPE*100 + Severity so invalid values are 847, 968, and 1089)
-        shp = shp[shp['TYPE_SEV'] < 100]
-        # filter for year range
-        shp = shp[(shp['YEAR'] >= year_range[0]) & (shp['YEAR'] <= year_range[1])]
-
-        # Bring in LANDFIRE Zones and create the SE and non SE zones 
+        shp = shp[shp['TYPE_SEV'] < 100]            
+        
+        # Bring in LANDFIRE Zones and create the SE and non SE zones for TSD value assignment
         zones = gpd.read_file(local_zones_file)
         se_zone_nums = [46, 55, 56, 58, 99]
         se_zones = zones[zones['ZONE_NUM'].isin(se_zone_nums)]
@@ -186,13 +200,13 @@ def main():
     
     # copy over Landfire zones shapefile from cloud
     local_zones_file = os.path.join(zones_dir,'zones.zip')
-    # logger.info(f'{local_zones_file}')
+    logger.info(f'{local_zones_file}')
     if not os.path.exists(local_zones_file):
-        gsutil_cp_zones = f"gsutil cp gs://landfire/conus/landfire/zones/zones.zip {local_zones_file}"
+        gsutil_cp_zones = f"gcloud alpha storage cp gs://landfire/conus/landfire/zones/zones.zip {local_zones_file}"
         proc = subprocess.run(gsutil_cp_zones, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if proc.returncode != 0:
             logger.info(proc.stdout)
-            raise Exception('gsutil cp failed')
+            raise Exception('gcloud alpha storage cp failed')
 
     with open(config_path) as file:
         config = yaml.full_load(file)
@@ -200,22 +214,20 @@ def main():
     year_info = config["year_info"]
     year_range = year_info.get("range")
     eff_yr = year_info.get("effective")
-
-    bucket_dir = "gs://pc448-20221128" # new bucket for pc task
-    # version = "Treatments_Plumas_Protect" # treatment subfolder containing zipped trt shps (e.g. gs://bucket/treatments/Treatments_Plumas_Protect)
     
+    #TODO: this could be defined in the config file if you wanted GCS location control
     gcs_output_dir = "gs://pc448-20221128/dist_outputs"
     ee_subdir = "pc448"
     
-    # logger.info(f"Defined Version: {version}")
     logger.info(f"effective year: {eff_yr}")
     logger.info(f"year range: {year_range}")
     
+    ## really not sure what I was going to do with this ################
     if args.file == None: # user does not provide -f file path arg to treatments shp, case is currently not handled well
         files = os.listdir(local_treatments_dir)
     else:
         files = [args.file] # directly provide treatment shapefile path (.shp|.zip)
-    
+    ######################################################
 
     input_filename = os.path.basename(files[0]).split('.')[0]
     file_prefix = 'dist_w_ranks_'
@@ -242,12 +254,12 @@ def main():
                 zipF.write(file,os.path.basename(file),compress_type=zipfile.ZIP_DEFLATED) # this is kind of funky, can't figure out how to get rel file path not whole directory to be added into archive file
         
         # upload .zip to cloud storage
-        gsutil_upload_cmd = f"gsutil cp {zipfile_path} {gcs_outfile}"
+        gsutil_upload_cmd = f"gcloud alpha storage cp {zipfile_path} {gcs_outfile}"
         logger.info(gsutil_upload_cmd)
         proc = subprocess.run(gsutil_upload_cmd, shell=True,stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if proc.returncode != 0:
             logger.info(proc.stdout)
-            raise Exception('gsutil upload failed, ensure folder exsists on GS bucket')
+            raise Exception('gcloud alpha storage upload failed, ensure folder exsists on GS bucket')
             
         # upload .zip to Earth Engine
         ee_upload_cmd = f"earthengine upload table --asset_id={ee_asset} {gcs_outfile}"

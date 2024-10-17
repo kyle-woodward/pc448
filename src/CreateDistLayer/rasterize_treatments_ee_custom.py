@@ -120,6 +120,7 @@ def main():
     )
     
     dist_w_ranks = ee.FeatureCollection(args.input) # plug EE asset path straight in insted of version-based file naming
+    # we rasterize on ranks as intermediary step so that we can take the most impactful treatment (ranked in order 1 -> 36) in case of feature overlap
     ranksImg = dist_w_ranks.reduceToImage(['ranks'], ee.Reducer.max()).rename('ranks')
     
     # rasterizes on ranks or DIST field given user input to --rasterize_on
